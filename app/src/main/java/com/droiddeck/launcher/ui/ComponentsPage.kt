@@ -853,6 +853,7 @@ fun ComponentsPage(
                         status = gpu.releaseStatus, checking = gpu.checking, checkedAt = gpu.checkedAt, importLabel = stringResource(R.string.comp_import_turnip), canRestore = false,
                         onSelect = gpuActions.onSelectLinux, onDelete = gpuActions.onRemoveLinux, onRefresh = gpuActions.onRefresh,
                         onDownload = gpuActions.onDownloadDriver, onImport = gpuActions.onImportLinux, onRestore = {}, onBack = { driverPage = null },
+                        sourceKey = gpu.sourceKey, sourceBuiltIns = gpu.sourceBuiltIns, onSourcesChanged = gpuActions.onSourcesChanged,
                     )
                     else DriverPage(
                         title = stringResource(R.string.comp_display_driver), hint = stringResource(R.string.comp_display_driver_hint),
@@ -862,6 +863,7 @@ fun ComponentsPage(
                         onSelect = gpuActions.onSelectAndroid, onDelete = gpuActions.onRemoveAndroid, onRefresh = gpuActions.onRefresh,
                         onDownload = gpuActions.onDownloadDriver, onImport = gpuActions.onImportAndroid, onRestore = gpuActions.onRestoreBundled,
                         onBack = { driverPage = null },
+                        sourceKey = gpu.sourceKey, sourceBuiltIns = gpu.sourceBuiltIns, onSourcesChanged = gpuActions.onSourcesChanged,
                     )
                 }
             }

@@ -74,6 +74,38 @@ class RepositorySourcesEditorTest {
         }
     }
 
+    private fun showDriverPage(scope: String, onSaved: () -> Unit = {}) {
+        Snapshot.sendApplyNotifications()
+        compose.setContent {
+            DroidDeckTheme {
+                Box(Modifier.fillMaxSize()) {
+                    DriverPage(
+                        title = "Runtime driver",
+                        hint = "Runtime hint",
+                        rows = emptyList(),
+                        selected = "",
+                        downloads = emptyList(),
+                        status = "",
+                        checking = false,
+                        importLabel = "Import",
+                        canRestore = false,
+                        onSelect = {},
+                        onDelete = {},
+                        onRefresh = {},
+                        onDownload = {},
+                        onImport = {},
+                        onRestore = {},
+                        onBack = {},
+                        sourceKey = scope,
+                        sourceBuiltIns = builtIns,
+                        onSourcesChanged = onSaved,
+                    )
+                    StepsLayer(Offset.Zero)
+                }
+            }
+        }
+    }
+
     private class QueuedDispatcher : CoroutineDispatcher() {
         private val pending = ArrayDeque<Runnable>()
         override fun dispatch(context: CoroutineContext, block: Runnable) { pending.addLast(block) }
@@ -101,6 +133,20 @@ class RepositorySourcesEditorTest {
             assertTrue(Steps.open)
         }
         compose.onAllNodes(isPopup()).assertCountEquals(0)
+    }
+
+    @Test fun driverPageSourcesUseTheirScopeAndNotifyAfterSave() {
+        val scope = "driver-page/runtime"
+        var saves = 0
+        showDriverPage(scope) { saves++ }
+        compose.onNodeWithContentDescription(context.getString(R.string.comp_check_drivers)).assertExists()
+        open()
+        compose.onNodeWithContentDescription(context.getString(R.string.sources_hide, repository)).performClick()
+        compose.onNodeWithText(context.getString(R.string.sources_save)).performClick()
+        compose.waitUntil(5_000) { saves == 1 }
+
+        assertTrue(RepositorySources.list(context, scope, builtIns).single().hidden)
+        assertFalse(RepositorySources.list(context, "driver-page/display", builtIns).single().hidden)
     }
 
     @Test fun leavingThePageRemovesItsSourceMenu() {
