@@ -16,6 +16,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -224,20 +226,24 @@ object SystemVulkanComponentStore {
         guestsStopped: Boolean,
     ) {
         require(HASH.matches(sha256)) { "Invalid System Vulkan component identity" }
-        installed(context, profile).firstOrNull { it.sha256 == sha256 }?.directory
-            ?: throw IllegalArgumentException("System Vulkan component is incomplete")
+        initializeSources(context, profile)
         synchronized(stateLock) {
+            installedByDigest(context, profile, sha256)
+                ?: throw IllegalArgumentException("System Vulkan component is incomplete")
             val current = readState(context, profile)
             if (current.damaged) throw IOException("System Vulkan activation state is damaged")
+            val effective = if (current.active == null) {
+                findInitial(context, profile, excluding = sha256)?.let { current.copy(active = it.sha256) } ?: current
+            } else current
             val next = if (guestsStopped) {
-                if (current.active == sha256) current.copy(pending = null, unreadyStarts = 0)
+                if (effective.active == sha256) effective.copy(pending = null, unreadyStarts = 0)
                 else Activation(
                     active = sha256,
-                    previous = current.active?.takeIf { it != sha256 },
+                    previous = effective.active?.takeIf { it != sha256 },
                     trialDigest = sha256,
                 )
-            } else if (current.active == sha256) current.copy(pending = null)
-            else current.copy(pending = sha256)
+            } else if (effective.active == sha256) effective.copy(pending = null)
+            else effective.copy(pending = sha256)
             writeState(context, profile, next)
         }
     }
@@ -292,6 +298,33 @@ object SystemVulkanComponentStore {
     @JvmStatic fun installed(context: Context, profile: SystemVulkanDriver.Profile): List<Installed> {
         initializeSources(context, profile)
         return synchronized(stateLock) { installedUnlocked(context, profile, readState(context, profile)) }
+    }
+
+    @JvmStatic fun canRemove(
+        context: Context,
+        profile: SystemVulkanDriver.Profile,
+        sha256: String,
+        guestsStopped: Boolean,
+    ): Boolean = synchronized(installLock) {
+        synchronized(stateLock) {
+            removable(context, profile, sha256, guestsStopped) != null
+        }
+    }
+
+    @JvmStatic fun remove(
+        context: Context,
+        profile: SystemVulkanDriver.Profile,
+        sha256: String,
+        guestsStopped: Boolean,
+    ) {
+        require(HASH.matches(sha256)) { "Invalid System Vulkan component identity" }
+        synchronized(installLock) {
+            synchronized(stateLock) {
+                val row = removable(context, profile, sha256, guestsStopped)
+                    ?: throw IOException("System Vulkan component is active, required as a fallback, or unsafe to remove")
+                removeDirectory(context, row)
+            }
+        }
     }
 
     @JvmStatic fun isReady(context: Context, profile: SystemVulkanDriver.Profile): Boolean {
@@ -365,6 +398,55 @@ object SystemVulkanComponentStore {
             trialDigest = pending.sha256,
         )
     }
+
+    private fun removable(
+        context: Context,
+        profile: SystemVulkanDriver.Profile,
+        sha256: String,
+        guestsStopped: Boolean,
+    ): Installed? {
+        if (!guestsStopped || !HASH.matches(sha256)) return null
+        val state = readState(context, profile)
+        if (state.damaged) return null
+        val rows = installedUnlocked(context, profile, state)
+        val row = rows.firstOrNull { it.sha256 == sha256 } ?: return null
+        val initial = if (state.active == null) findInitial(context, profile) else null
+        if (sha256 == state.active || sha256 == state.previous || sha256 == state.pending ||
+            sha256 == state.trialDigest || sha256 == initial?.sha256 ||
+            launches.values.any { it.variant == profile.id && it.sha256 == sha256 } ||
+            rows.none { it.sha256 != sha256 }) return null
+        return row.takeIf { safeRemovalTarget(context, it) }
+    }
+
+    private fun removeDirectory(context: Context, row: Installed) {
+        require(safeRemovalTarget(context, row)) { "Unsafe System Vulkan component directory" }
+        val base = if (row.legacy) legacyRoot(context) else root(context)
+        val stage = File(base, ".stage-${UUID.randomUUID()}")
+        if (!row.directory.renameTo(stage)) throw IOException("Cannot quarantine System Vulkan component")
+        FileUtils.delete(stage)
+        if (stage.exists() || Files.isSymbolicLink(stage.toPath())) {
+            throw IOException("Cannot remove quarantined System Vulkan component")
+        }
+    }
+
+    private fun safeRemovalTarget(context: Context, row: Installed): Boolean {
+        val base = if (row.legacy) legacyRoot(context) else root(context)
+        val parent = base.parentFile ?: return false
+        val expectedParent = if (row.legacy) context.filesDir else File(context.filesDir, "components")
+        val expected = File(base, row.sha256)
+        return HASH.matches(row.sha256) && samePath(parent, expectedParent) && samePath(row.directory, expected) &&
+            Files.isDirectory(context.filesDir.toPath(), LinkOption.NOFOLLOW_LINKS) &&
+            Files.isDirectory(parent.toPath(), LinkOption.NOFOLLOW_LINKS) &&
+            Files.isDirectory(base.toPath(), LinkOption.NOFOLLOW_LINKS) &&
+            Files.isDirectory(expected.toPath(), LinkOption.NOFOLLOW_LINKS) &&
+            !Files.isSymbolicLink(context.filesDir.toPath()) && !Files.isSymbolicLink(parent.toPath()) &&
+            !Files.isSymbolicLink(base.toPath()) &&
+            !Files.isSymbolicLink(expected.toPath()) &&
+            if (row.legacy) safeLegacyPath(expected) else safeComponentPath(expected)
+    }
+
+    private fun samePath(first: File, second: File): Boolean =
+        first.toPath().toAbsolutePath().normalize() == second.toPath().toAbsolutePath().normalize()
 
     private fun candidates(
         context: Context,
@@ -449,7 +531,7 @@ object SystemVulkanComponentStore {
                 val seen = HashSet<String>()
                 while (true) {
                     val entry = tar.nextTarEntry ?: break
-                    val path = SystemVulkanManifest.path(entry.name)
+                    val path = SystemVulkanManifest.archivePath(entry.name, entry.isDirectory)
                     require(seen.add(path) && path != "component.json") { "Duplicate System Vulkan archive path: $path" }
                     if (entry.isDirectory) {
                         require(path in parents) { "Unexpected System Vulkan directory: $path" }
@@ -568,8 +650,13 @@ object SystemVulkanComponentStore {
         )
     }
 
-    private fun findInitial(context: Context, profile: SystemVulkanDriver.Profile): Installed? =
-        installedUnlocked(context, profile, readState(context, profile)).maxByOrNull { it.directory.lastModified() }
+    private fun findInitial(
+        context: Context,
+        profile: SystemVulkanDriver.Profile,
+        excluding: String? = null,
+    ): Installed? = installedUnlocked(context, profile, readState(context, profile))
+        .filterNot { it.sha256 == excluding }
+        .maxByOrNull { it.directory.lastModified() }
 
     private fun installedUnlocked(
         context: Context,

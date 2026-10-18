@@ -24,6 +24,7 @@ import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -150,6 +151,153 @@ class ComponentsPageProfileTest {
         compose.runOnIdle { assertEquals(GPU_MODE_PAIR, chosenMode) }
         compose.onNodeWithText(context.getString(R.string.gpu_mode_mix)).performScrollTo().performClick()
         compose.runOnIdle { assertEquals(GPU_MODE_MIX, chosenMode) }
+    }
+
+    @Test fun systemAutoAndMatchedPairShowInstalledAndAvailableRuntimeBuildsWithoutZipImport() {
+        val context = RuntimeEnvironment.getApplication()
+        val selected = mutableListOf<String>()
+        val removed = mutableListOf<String>()
+        val downloaded = mutableListOf<String>()
+        var mode by mutableStateOf(GPU_MODE_AUTO)
+        compose.setContent {
+            DroidDeckTheme {
+                GpuDriversBody(
+                    gpu = GpuDriversState(
+                        gpuName = "Mali-G715",
+                        systemGpu = true,
+                        systemDriverName = "Mali",
+                        mode = mode,
+                        linuxSelected = "active",
+                        systemRows = listOf(
+                            DriverRow("active", "Mali runtime", "Version 1.2.3", false, DriverRow.DOWNLOADED),
+                            DriverRow("previous", "Previous build", "Build abc123", true, DriverRow.LEGACY),
+                        ),
+                        systemDownloads = listOf(DownloadRow("release:new", "Mali runtime 1.3.0", "Published today")),
+                        autoStatus = "Recommended component is installed.",
+                        releaseStatus = "Sources checked now.",
+                        checkedAt = Long.MAX_VALUE,
+                    ),
+                    actions = GpuDriversActions(
+                        onMode = { mode = it },
+                        onSelectLinux = { selected += it },
+                        onRemoveLinux = { removed += it },
+                        onDownloadDriver = { downloaded += it },
+                    ),
+                    single = true,
+                    first = FocusRequester(),
+                    slotFocus = mapOf(SLOT_DISPLAY to FocusRequester(), SLOT_RUNTIME to FocusRequester()),
+                    onOpenSlot = { _, _ -> },
+                )
+            }
+        }
+
+        compose.onNodeWithText("Mali runtime").assertExists()
+        compose.onNodeWithText("Previous build").performScrollTo().performClick()
+        compose.onNodeWithText("Mali runtime 1.3.0").assertExists()
+        compose.onNodeWithText(context.getString(R.string.common_download)).performScrollTo().performClick()
+        compose.onNodeWithContentDescription(context.getString(R.string.common_delete_named, "Previous build")).performScrollTo().performClick()
+        compose.onNodeWithText(context.getString(R.string.common_delete)).performClick()
+        compose.onNodeWithText("Recommended component is installed.").assertExists()
+        compose.onNodeWithText("Sources checked now.").assertExists()
+        compose.onNodeWithText(context.getString(R.string.comp_import_zip)).assertDoesNotExist()
+        compose.runOnIdle {
+            assertEquals(listOf("previous"), selected)
+            assertEquals(listOf("previous"), removed)
+            assertEquals(listOf("release:new"), downloaded)
+        }
+
+        compose.onNodeWithText(context.getString(R.string.gpu_mode_pair)).performScrollTo().performClick()
+        compose.onNodeWithText(context.getString(R.string.gpu_system_runtime_title, "Mali")).assertExists()
+        compose.onNodeWithText("Mali runtime").assertExists()
+        compose.onNodeWithText("Mali runtime 1.3.0").assertExists()
+        compose.onNodeWithText(context.getString(R.string.comp_import_zip)).assertDoesNotExist()
+    }
+
+    @Test fun adrenoMatchedPairKeepsZipImport() {
+        val context = RuntimeEnvironment.getApplication()
+        compose.setContent {
+            DroidDeckTheme {
+                GpuDriversBody(
+                    gpu = GpuDriversState(mode = GPU_MODE_PAIR),
+                    actions = GpuDriversActions(),
+                    single = true,
+                    first = FocusRequester(),
+                    slotFocus = emptyMap(),
+                    onOpenSlot = { _, _ -> },
+                )
+            }
+        }
+
+        compose.onNodeWithText(context.getString(R.string.comp_import_zip)).assertExists()
+    }
+
+    @Test fun driverPageShowsScopedSourcesBesideRefresh() {
+        val context = RuntimeEnvironment.getApplication()
+        compose.setContent {
+            DroidDeckTheme {
+                DriverPage(
+                    title = "Runtime driver",
+                    hint = "Runtime hint",
+                    rows = listOf(DriverRow("runtime", "Runtime build", "Version 1", false)),
+                    selected = "runtime",
+                    downloads = emptyList(),
+                    status = "",
+                    checking = false,
+                    importLabel = "Import",
+                    canRestore = false,
+                    onSelect = {},
+                    onDelete = {},
+                    onRefresh = {},
+                    onDownload = {},
+                    onImport = {},
+                    onRestore = {},
+                    onBack = {},
+                    sourceKey = "system-vulkan:mali",
+                    sourceBuiltIns = listOf("droid-deck/droiddeck"),
+                )
+            }
+        }
+
+        compose.onNodeWithContentDescription(context.getString(R.string.sources_component_title)).assertExists()
+        compose.onNodeWithContentDescription(context.getString(R.string.comp_check_drivers)).assertExists()
+    }
+
+    @Test fun systemDisplayPageHidesDownloadsRefreshSourcesAndZipImport() {
+        val context = RuntimeEnvironment.getApplication()
+        var refreshed = 0
+        compose.setContent {
+            DroidDeckTheme {
+                DriverPage(
+                    title = context.getString(R.string.comp_display_driver),
+                    hint = context.getString(R.string.gpu_provided_by_android),
+                    rows = listOf(DriverRow("system", context.getString(R.string.gpu_android_system_display), context.getString(R.string.gpu_provided_by_android), false)),
+                    selected = "system",
+                    downloads = emptyList(),
+                    status = "",
+                    checking = false,
+                    checkedAt = 0L,
+                    importLabel = context.getString(R.string.comp_import_adrenotools),
+                    canRestore = false,
+                    onSelect = {},
+                    onDelete = {},
+                    onRefresh = { refreshed++ },
+                    onDownload = {},
+                    onImport = {},
+                    onRestore = {},
+                    onBack = {},
+                    showDownloads = false,
+                    showRefresh = false,
+                    allowImport = false,
+                )
+            }
+        }
+
+        compose.onNodeWithText(context.getString(R.string.gpu_android_system_display)).assertExists()
+        compose.onNodeWithText(context.getString(R.string.driver_available)).assertDoesNotExist()
+        compose.onNodeWithText(context.getString(R.string.comp_import_adrenotools)).assertDoesNotExist()
+        compose.onNodeWithContentDescription(context.getString(R.string.sources_component_title)).assertDoesNotExist()
+        compose.onNodeWithContentDescription(context.getString(R.string.comp_check_drivers)).assertDoesNotExist()
+        compose.runOnIdle { assertEquals(0, refreshed) }
     }
 
     @Test fun gameProfilesCoexistWithTheDefaultComponentStack() {

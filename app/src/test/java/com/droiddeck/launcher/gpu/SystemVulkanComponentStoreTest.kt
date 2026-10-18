@@ -3,11 +3,15 @@ package com.droiddeck.launcher.gpu
 import com.droiddeck.launcher.core.FileUtils
 import com.droiddeck.launcher.artifact.GitHubArtifacts
 import com.droiddeck.launcher.artifact.RepositorySources
+import com.github.luben.zstd.ZstdOutputStream
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -15,7 +19,10 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
+import java.lang.reflect.InvocationTargetException
+import java.nio.file.Files
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -28,6 +35,9 @@ class SystemVulkanComponentStoreTest {
         FileUtils.delete(File(app.filesDir, "system_vulkan"))
         FileUtils.delete(File(app.filesDir, "repository-sources"))
         FileUtils.delete(File(app.cacheDir, "repository-metadata"))
+        FileUtils.delete(File(app.cacheDir, "system-vulkan-directory-fixture.tar.zst"))
+        FileUtils.delete(File(app.filesDir, "system-vulkan-remove-outside"))
+        FileUtils.delete(File(app.filesDir, "system-vulkan-legacy-outside"))
     }
 
     @Test fun initialSourcesKeepOnlyTheVisibleOfficialRepository() {
@@ -196,19 +206,253 @@ class SystemVulkanComponentStoreTest {
         assertEquals(local, SystemVulkanComponentStore.installed(app, profile).single().directory)
     }
 
+    @Test fun inactiveManagedComponentCanBeRemovedWithoutFollowingChildSymlinksOrDeletingOrigins() {
+        val active = component("8".repeat(64), "active")
+        SystemVulkanComponentStore.activate(app, profile, active.name, guestsStopped = true)
+        val removable = component("9".repeat(64), "removable")
+        val outside = File(app.filesDir, "system-vulkan-remove-outside").apply { mkdirs() }
+        val sentinel = File(outside, "keep").apply { writeText("keep") }
+        Files.createSymbolicLink(File(removable, "outside-link").toPath(), outside.toPath())
+        val origin = File(app.filesDir, "components/system-vulkan/origins/${removable.name}/source.json")
+            .apply { parentFile!!.mkdirs(); writeText("{}") }
+
+        assertTrue(SystemVulkanComponentStore.canRemove(app, profile, removable.name, guestsStopped = true))
+        SystemVulkanComponentStore.remove(app, profile, removable.name, guestsStopped = true)
+
+        assertFalse(removable.exists())
+        assertTrue(sentinel.isFile)
+        assertTrue(origin.isFile)
+        assertThrows(IllegalArgumentException::class.java) {
+            SystemVulkanComponentStore.activate(app, profile, removable.name, guestsStopped = true)
+        }
+        assertEquals(active, SystemVulkanComponentStore.capture(app, profile, guestsStopped = true).directory)
+    }
+
+    @Test fun inactiveLegacyComponentCanBeRemoved() {
+        val active = component("a".repeat(64), "active")
+        SystemVulkanComponentStore.activate(app, profile, active.name, guestsStopped = true)
+        val legacy = component("b".repeat(64), "legacy", legacy = true)
+
+        assertTrue(SystemVulkanComponentStore.canRemove(app, profile, legacy.name, guestsStopped = true))
+        SystemVulkanComponentStore.remove(app, profile, legacy.name, guestsStopped = true)
+
+        assertFalse(legacy.exists())
+        assertEquals(listOf(active.name), SystemVulkanComponentStore.installed(app, profile).map { it.sha256 })
+    }
+
+    @Test fun firstManagedActivationRetainsImplicitLegacyFallbackUntilReady() {
+        val legacy = component("b".repeat(64), "legacy", legacy = true)
+        val managed = component("c".repeat(64), "managed")
+
+        SystemVulkanComponentStore.activate(app, profile, managed.name, guestsStopped = true)
+
+        var rows = SystemVulkanComponentStore.installed(app, profile)
+        assertTrue(rows.first { it.sha256 == managed.name }.active)
+        assertTrue(rows.first { it.sha256 == legacy.name }.previous)
+        assertRemovalRefused(legacy.name)
+        val snapshot = SystemVulkanComponentStore.capture(app, profile, guestsStopped = true)
+        SystemVulkanComponentStore.launchStarting(app, snapshot, 772)
+        SystemVulkanComponentStore.sessionReady(772)
+        rows = SystemVulkanComponentStore.installed(app, profile)
+        assertFalse(rows.first { it.sha256 == legacy.name }.previous)
+        assertTrue(SystemVulkanComponentStore.canRemove(app, profile, legacy.name, guestsStopped = true))
+    }
+
+    @Test fun pendingManagedSelectionMaterializesImplicitLegacyActiveState() {
+        val legacy = component("d".repeat(64), "legacy", legacy = true)
+        val managed = component("e".repeat(64), "managed")
+
+        SystemVulkanComponentStore.activate(app, profile, managed.name, guestsStopped = false)
+
+        var rows = SystemVulkanComponentStore.installed(app, profile)
+        assertTrue(rows.first { it.sha256 == legacy.name }.active)
+        assertTrue(rows.first { it.sha256 == managed.name }.pending)
+        SystemVulkanComponentStore.capture(app, profile, guestsStopped = true)
+        rows = SystemVulkanComponentStore.installed(app, profile)
+        assertTrue(rows.first { it.sha256 == managed.name }.active)
+        assertTrue(rows.first { it.sha256 == legacy.name }.previous)
+        assertRemovalRefused(legacy.name)
+    }
+
+    @Test fun activationAndFallbackReferencesBlockRemoval() {
+        val previous = component("c".repeat(64), "previous")
+        val active = component("d".repeat(64), "active")
+        val pending = component("e".repeat(64), "pending")
+        val inactive = component("f".repeat(64), "inactive")
+        SystemVulkanComponentStore.activate(app, profile, previous.name, guestsStopped = true)
+        SystemVulkanComponentStore.activate(app, profile, active.name, guestsStopped = true)
+        SystemVulkanComponentStore.activate(app, profile, pending.name, guestsStopped = false)
+
+        assertRemovalRefused(previous.name)
+        assertRemovalRefused(active.name)
+        assertRemovalRefused(pending.name)
+        assertRemovalRefused(inactive.name, guestsStopped = false)
+        assertTrue(SystemVulkanComponentStore.canRemove(app, profile, inactive.name, guestsStopped = true))
+    }
+
+    @Test fun effectiveInitialAndSoleFallbackCannotBeRemoved() {
+        val older = component("1".repeat(64), "older")
+        val initial = component("2".repeat(64), "initial")
+        assertTrue(older.setLastModified(100_000L))
+        assertTrue(initial.setLastModified(200_000L))
+
+        assertRemovalRefused(initial.name)
+        assertTrue(SystemVulkanComponentStore.canRemove(app, profile, older.name, guestsStopped = true))
+
+        FileUtils.delete(older)
+        assertRemovalRefused(initial.name)
+    }
+
+    @Test fun liveLaunchBlocksRemovalAfterActivationStateMovesOn() {
+        val launched = component("3".repeat(64), "launched")
+        val next = component("4".repeat(64), "next")
+        val active = component("5".repeat(64), "active")
+        SystemVulkanComponentStore.activate(app, profile, launched.name, guestsStopped = true)
+        val snapshot = SystemVulkanComponentStore.capture(app, profile, guestsStopped = true)
+        SystemVulkanComponentStore.launchStarting(app, snapshot, 771)
+        try {
+            SystemVulkanComponentStore.activate(app, profile, next.name, guestsStopped = true)
+            SystemVulkanComponentStore.activate(app, profile, active.name, guestsStopped = true)
+            assertRemovalRefused(launched.name)
+        } finally {
+            SystemVulkanComponentStore.sessionStopped(771)
+        }
+        assertTrue(SystemVulkanComponentStore.canRemove(app, profile, launched.name, guestsStopped = true))
+    }
+
+    @Test fun damagedStateMalformedIdentityAndSymlinkPathsRefuseRemoval() {
+        val active = component("6".repeat(64), "active")
+        val inactive = component("7".repeat(64), "inactive")
+        SystemVulkanComponentStore.activate(app, profile, active.name, guestsStopped = true)
+        val state = File(app.filesDir, "components/system-vulkan/state-${profile.id}.json")
+        state.writeText("{broken")
+        assertFalse(SystemVulkanComponentStore.canRemove(app, profile, inactive.name, guestsStopped = true))
+        assertThrows(IOException::class.java) {
+            SystemVulkanComponentStore.remove(app, profile, inactive.name, guestsStopped = true)
+        }
+        assertFalse(SystemVulkanComponentStore.canRemove(app, profile, "bad", guestsStopped = true))
+        assertThrows(IllegalArgumentException::class.java) {
+            SystemVulkanComponentStore.remove(app, profile, "bad", guestsStopped = true)
+        }
+
+        state.delete()
+        val outside = File(app.filesDir, "system-vulkan-remove-outside").apply { mkdirs() }
+        val linkedDigest = "0".repeat(64)
+        val linkedTarget = File(outside, linkedDigest)
+        populate(linkedTarget)
+        writeManagedMetadata(linkedTarget, linkedDigest, "linked")
+        Files.createSymbolicLink(
+            File(app.filesDir, "components/system-vulkan/$linkedDigest").toPath(),
+            linkedTarget.toPath(),
+        )
+        assertRemovalRefused(linkedDigest)
+
+        val legacyOutside = File(app.filesDir, "system-vulkan-legacy-outside").apply { mkdirs() }
+        val legacyDigest = "a".repeat(64)
+        populate(File(legacyOutside, legacyDigest))
+        Files.createSymbolicLink(File(app.filesDir, "system_vulkan").toPath(), legacyOutside.toPath())
+        assertRemovalRefused(legacyDigest)
+    }
+
+    @Test fun extractorAcceptsProducerDirectoryHeaders() {
+        val payload = SystemVulkanManifest.required(profile.id).associateWith { path ->
+            if (path == "run-proton.py") "#!/bin/sh\n".toByteArray() else path.toByteArray()
+        } + ("licenses/LICENSE" to "license\n".toByteArray())
+        val files = payload.map { (path, bytes) ->
+            SystemVulkanManifest.Entry(
+                path, bytes.size.toLong(), RepositorySources.sha256(bytes), if (path == "run-proton.py") 493 else 420,
+            )
+        }
+        val tree = SystemVulkanManifest.treeDigest(files)
+        val repository = "wallentx/droiddeck"
+        val commit = "a".repeat(40)
+        val buildUrl = "https://github.com/wallentx/DroidDeck/actions/runs/1"
+        val inventory = JSONArray()
+        files.forEach { file -> inventory.put(JSONObject().put("path", file.path).put("type", "file")
+            .put("size", file.size).put("sha256", file.sha256).put("mode", file.mode)) }
+        val manifest = JSONObject().put("schema", 1).put("component", "system-vulkan")
+            .put("variant", profile.id).put("version", "directory-fixture")
+            .put("requires", JSONObject().put("componentApi", 1).put("abi", "arm64-v8a").put("minSdk", 26))
+            .put("treeSha256", tree)
+            .put("provenance", JSONObject().put("repository", repository).put("commit", commit).put("buildUrl", buildUrl))
+            .put("files", inventory).put("licenses", JSONArray().put("licenses/LICENSE"))
+            .toString().toByteArray()
+        val archive = File(app.cacheDir, "system-vulkan-directory-fixture.tar.zst")
+        archive.parentFile!!.mkdirs()
+        ZstdOutputStream(FileOutputStream(archive)).use { compressed ->
+            TarArchiveOutputStream(compressed).use { tar ->
+                addTarFile(tar, "component.json", manifest, 420)
+                payload.keys.flatMap { path ->
+                    val segments = path.split('/')
+                    (1 until segments.size).map { segments.take(it).joinToString("/") }
+                }.toSortedSet().forEach { directory ->
+                    tar.putArchiveEntry(TarArchiveEntry("$directory/").apply { mode = 493 })
+                    tar.closeArchiveEntry()
+                }
+                payload.toSortedMap().forEach { (path, bytes) ->
+                    addTarFile(tar, path, bytes, if (path == "run-proton.py") 493 else 420)
+                }
+            }
+        }
+        val digest = RepositorySources.sha256(archive.readBytes())
+        val source = RepositorySources.Source("fixture", repository, false, false, repositoryId = 1)
+        val candidate = SystemVulkanComponentStore.Candidate(
+            "fixture:$digest", source.id, repository, 1, 1, "fixture", "2026-01-01T00:00:00Z",
+            "directory-fixture", profile.id, 26, "b".repeat(64), 1,
+            "system-vulkan-${profile.id}.tar.zst", "https://example.invalid/component", archive.length(), digest,
+            tree, commit, buildUrl,
+        )
+        val target = File(app.filesDir, "components/system-vulkan/$digest")
+        target.parentFile!!.mkdirs()
+        val extract = SystemVulkanComponentStore::class.java.getDeclaredMethod(
+            "extract", File::class.java, File::class.java,
+            SystemVulkanComponentStore.Candidate::class.java, RepositorySources.Source::class.java,
+        ).apply { isAccessible = true }
+        try {
+            extract.invoke(SystemVulkanComponentStore, archive, target, candidate, source)
+        } catch (error: InvocationTargetException) {
+            throw error.targetException
+        }
+
+        assertTrue(File(target, "lib").isDirectory)
+        assertTrue(File(target, "lib/libhybris/linker/q.so").isFile)
+        assertTrue(File(target, "READY").isFile)
+    }
+
     private fun component(hash: String, version: String, legacy: Boolean = false): File {
         val directory = File(app.filesDir, (if (legacy) "system_vulkan/" else "components/system-vulkan/") + hash)
+        populate(directory)
+        if (!legacy) {
+            writeManagedMetadata(directory, hash, version)
+        }
+        return directory
+    }
+
+    private fun populate(directory: File) {
         SystemVulkanManifest.required(profile.id).forEach { path ->
             File(directory, path).apply { parentFile!!.mkdirs(); writeText(path); if (path == "run-proton.py") setExecutable(true, false) }
         }
         File(directory, "icd.json").writeText("{}")
-        if (!legacy) {
-            File(directory, ".droiddeck-receipt.json").writeText(JSONObject()
-                .put("schema", 1).put("component", "system-vulkan").put("variant", profile.id)
-                .put("version", version).put("sha256", hash).put("repository", "wallentx/droiddeck")
-                .put("tag", "test").toString())
-            File(directory, "READY").writeText(hash)
+    }
+
+    private fun writeManagedMetadata(directory: File, hash: String, version: String) {
+        File(directory, ".droiddeck-receipt.json").writeText(JSONObject()
+            .put("schema", 1).put("component", "system-vulkan").put("variant", profile.id)
+            .put("version", version).put("sha256", hash).put("repository", "wallentx/droiddeck")
+            .put("tag", "test").toString())
+        File(directory, "READY").writeText(hash)
+    }
+
+    private fun assertRemovalRefused(hash: String, guestsStopped: Boolean = true) {
+        assertFalse(SystemVulkanComponentStore.canRemove(app, profile, hash, guestsStopped))
+        assertThrows(IOException::class.java) {
+            SystemVulkanComponentStore.remove(app, profile, hash, guestsStopped)
         }
-        return directory
+    }
+
+    private fun addTarFile(tar: TarArchiveOutputStream, path: String, bytes: ByteArray, mode: Int) {
+        tar.putArchiveEntry(TarArchiveEntry(path).apply { size = bytes.size.toLong(); this.mode = mode })
+        tar.write(bytes)
+        tar.closeArchiveEntry()
     }
 }

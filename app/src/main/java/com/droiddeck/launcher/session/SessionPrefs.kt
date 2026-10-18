@@ -204,6 +204,7 @@ object SessionPrefs {
     const val GPU_DRIVERS_AUTO = "auto"
     const val GPU_DRIVERS_MANUAL = "manual"
     const val GPU_DRIVERS_MIX = "mix"
+    const val GPU_DRIVERS_PAIR = "pair"
 
     fun gpuDriverMode(context: Context): String =
         prefs(context).getString("gpuDriverMode", GPU_DRIVERS_AUTO) ?: GPU_DRIVERS_AUTO

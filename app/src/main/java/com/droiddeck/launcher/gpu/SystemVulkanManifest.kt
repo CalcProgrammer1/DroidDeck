@@ -195,6 +195,10 @@ internal object SystemVulkanManifest {
         }
     }
 
+    fun archivePath(value: String, isDirectory: Boolean): String = path(
+        if (isDirectory) value.removeSuffix("/") else value,
+    )
+
     private val COMMON_REQUIRED = setOf(
         "lib/libhybris-vulkan-icd.so.0",
         "lib/libhybris-common.so.1",

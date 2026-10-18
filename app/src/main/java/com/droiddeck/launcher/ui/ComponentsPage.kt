@@ -871,16 +871,32 @@ fun ComponentsPage(
                         status = gpu.releaseStatus, checking = gpu.checking, checkedAt = gpu.checkedAt, importLabel = stringResource(R.string.comp_import_turnip), canRestore = false,
                         onSelect = gpuActions.onSelectLinux, onDelete = gpuActions.onRemoveLinux, onRefresh = gpuActions.onRefresh,
                         onDownload = gpuActions.onDownloadDriver, onImport = gpuActions.onImportLinux, onRestore = {}, onBack = { driverPage = null },
+                        sourceKey = gpu.sourceKey, sourceBuiltIns = gpu.sourceBuiltIns, onSourcesChanged = gpuActions.onSourcesChanged,
+                        allowImport = !gpu.systemGpu,
                     )
-                    else DriverPage(
-                        title = stringResource(R.string.comp_display_driver), hint = stringResource(R.string.comp_display_driver_hint),
-                        rows = gpu.androidRows, selected = gpu.androidSelected, downloads = gpu.androidDownloads,
-                        status = gpu.releaseStatus, checking = gpu.checking, checkedAt = gpu.checkedAt, importLabel = stringResource(R.string.comp_import_adrenotools),
-                        canRestore = gpu.canRestoreBundled,
-                        onSelect = gpuActions.onSelectAndroid, onDelete = gpuActions.onRemoveAndroid, onRefresh = gpuActions.onRefresh,
-                        onDownload = gpuActions.onDownloadDriver, onImport = gpuActions.onImportAndroid, onRestore = gpuActions.onRestoreBundled,
-                        onBack = { driverPage = null },
-                    )
+                    else {
+                        val rows = if (gpu.systemGpu) gpu.androidRows.filterNot { it.tag == DriverRow.BUNDLED } else gpu.androidRows
+                        DriverPage(
+                            title = stringResource(R.string.comp_display_driver),
+                            hint = stringResource(if (gpu.systemGpu) R.string.gpu_provided_by_android else R.string.comp_display_driver_hint),
+                            rows = rows, selected = gpu.androidSelected,
+                            downloads = if (gpu.systemGpu) emptyList() else gpu.androidDownloads,
+                            status = if (gpu.systemGpu) "" else gpu.releaseStatus,
+                            checking = if (gpu.systemGpu) false else gpu.checking,
+                            checkedAt = gpu.checkedAt,
+                            importLabel = stringResource(R.string.comp_import_adrenotools),
+                            canRestore = !gpu.systemGpu && gpu.canRestoreBundled,
+                            onSelect = gpuActions.onSelectAndroid, onDelete = gpuActions.onRemoveAndroid, onRefresh = gpuActions.onRefresh,
+                            onDownload = gpuActions.onDownloadDriver, onImport = gpuActions.onImportAndroid, onRestore = gpuActions.onRestoreBundled,
+                            onBack = { driverPage = null },
+                            sourceKey = if (gpu.systemGpu) "" else gpu.sourceKey,
+                            sourceBuiltIns = gpu.sourceBuiltIns,
+                            onSourcesChanged = gpuActions.onSourcesChanged,
+                            showDownloads = !gpu.systemGpu,
+                            showRefresh = !gpu.systemGpu,
+                            allowImport = !gpu.systemGpu || rows.any { it.removable },
+                        )
+                    }
                 }
             }
             val from = driverFrom

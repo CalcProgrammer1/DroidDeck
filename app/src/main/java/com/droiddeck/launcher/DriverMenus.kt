@@ -28,6 +28,8 @@ import com.droiddeck.launcher.session.SessionService
 import com.droiddeck.launcher.session.SessionPrefs
 import com.droiddeck.launcher.session.QuestExperimental
 import com.droiddeck.launcher.session.SessionState
+import com.droiddeck.launcher.session.SessionPhase
+import com.droiddeck.launcher.session.OrphanReaper
 import com.droiddeck.launcher.ui.DriverRow
 import com.droiddeck.launcher.ui.DriverSlot
 import com.droiddeck.launcher.ui.GPU_MODE_AUTO
@@ -37,7 +39,9 @@ import com.droiddeck.launcher.ui.GpuDriversState
 import com.droiddeck.launcher.ui.PairRow
 import com.droiddeck.launcher.wayland.CompositorHost
 
-internal class DriverMenus(private val activity: Activity, private val ui: Handler) {
+internal class DriverMenus(
+    private val activity: Activity, private val ui: Handler, val gpu: GpuInfo = GpuInfo.detect(),
+) {
     var linuxRows by mutableStateOf<List<DriverRow>>(emptyList())
     var linuxDownloads by mutableStateOf<List<com.droiddeck.launcher.ui.DownloadRow>>(emptyList())
     var androidDownloads by mutableStateOf<List<com.droiddeck.launcher.ui.DownloadRow>>(emptyList())
@@ -46,9 +50,10 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
     var canRestoreBundled by mutableStateOf(false)
     private val releaseProgress = HashMap<String, Int>()
     private var systemCatalog = SystemVulkanComponentStore.Catalog(emptyList(), emptyList(), 0L)
+    private var systemRefreshProblem: String? = null
+    private var systemRows by mutableStateOf<List<DriverRow>>(emptyList())
     var linuxSelected by mutableStateOf("")
-    val gpu: GpuInfo = GpuInfo.detect()
-    var mode by mutableStateOf(SessionPrefs.GPU_DRIVERS_AUTO)
+    var mode by mutableStateOf(SessionPrefs.gpuDriverMode(activity))
     var pairRows by mutableStateOf<List<PairRow>>(emptyList())
     var pairBusy by mutableStateOf<String?>(null)
     var pairPercent by mutableIntStateOf(-1)
@@ -68,7 +73,9 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
     val uiMode: String get() = when (mode) {
         SessionPrefs.GPU_DRIVERS_AUTO -> GPU_MODE_AUTO
         SessionPrefs.GPU_DRIVERS_MIX -> GPU_MODE_MIX
-        else -> if (pairModeOpen || pairRows.any { it.active }) GPU_MODE_PAIR else GPU_MODE_MIX
+        SessionPrefs.GPU_DRIVERS_PAIR -> GPU_MODE_PAIR
+        else -> if (pairModeOpen || pairRows.any { it.active } ||
+            (systemGpu && SessionPrefs.androidDriver(activity) == TurnipDriver.AUTO && actualLinuxSelected.isEmpty())) GPU_MODE_PAIR else GPU_MODE_MIX
     }
 
     fun state() = GpuDriversState(
@@ -87,6 +94,7 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
         checkedAt = if (systemProfile != null) systemCatalog.checkedAt else TurnipReleases.cached(activity)?.checkedAt ?: 0L,
         sourceKey = systemProfile?.let { SystemVulkanComponentStore.scope(it) } ?: TurnipReleases.SOURCE_SCOPE,
         sourceBuiltIns = if (systemProfile != null) SystemVulkanComponentStore.sourceBuiltIns() else TurnipReleases.sourceBuiltIns(),
+        systemRows = systemRows, systemDownloads = if (systemGpu) linuxDownloads else emptyList(),
     )
 
     private fun slotSource(chosenDefault: Boolean, defaultLabel: Int): String = activity.getString(when {
@@ -106,6 +114,7 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
             pending = restartPending,
             status = when {
                 restartPending -> activity.getString(R.string.gpu_display_pending, live ?: activity.getString(R.string.gpu_previous_driver))
+                systemGpu && androidSelected == TurnipDriver.AUTO -> activity.getString(R.string.gpu_provided_by_android)
                 CompositorHost.isStarted -> activity.getString(R.string.gpu_display_live)
                 else -> activity.getString(R.string.gpu_display_next)
             },
@@ -125,6 +134,7 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
             pending = runtimePending,
             status = when {
                 runtimePending -> activity.getString(R.string.gpu_runtime_pending, live ?: activity.getString(R.string.gpu_previous_driver))
+                systemGpu && systemRows.isEmpty() && actualLinuxSelected.isEmpty() -> activity.getString(R.string.gpu_system_missing)
                 sessionRunning -> activity.getString(R.string.gpu_runtime_live)
                 else -> activity.getString(R.string.gpu_runtime_hint)
             },
@@ -142,6 +152,9 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
     var androidSelected by mutableStateOf("")
 
     fun refreshDrivers() {
+        if (systemGpu && SessionPrefs.androidDriver(activity) in TurnipDriver.BUNDLED) {
+            SessionPrefs.setAndroidDriver(activity, TurnipDriver.AUTO)
+        }
         val lm = LinuxVulkanDriverManager(activity)
         fun origin(id: String) = if (TurnipReleases.isDownloaded(activity, id)) DriverRow.DOWNLOADED else DriverRow.IMPORTED
         val bundles = DriverBundle.all(activity)
@@ -149,16 +162,30 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
             DriverRow(id, it.label, activity.getString(if (linux) R.string.drivers_bundle_sets_display else R.string.drivers_bundle_sets_runtime), true, DriverRow.BUNDLE)
         }
         val installedSystem = systemProfile?.let { SystemVulkanComponentStore.installed(activity, it) }.orEmpty()
-        val systemRows = installedSystem.map { component ->
+        val selectedSystem = installedSystem.firstOrNull { it.pending }
+            ?: installedSystem.firstOrNull { it.active }
+            ?: installedSystem.takeIf { systemProfile?.let { profile -> SystemVulkanComponentStore.isReady(activity, profile) } == true }
+                ?.maxByOrNull { it.directory.lastModified() }
+        val sessionStopped = !SessionState.running && SessionState.phase == SessionPhase.IDLE
+        systemRows = installedSystem.map { component ->
+            val removable = sessionStopped && SystemVulkanComponentStore.canRemove(activity, systemProfile!!, component.sha256, true)
+            val protection = when {
+                !sessionStopped -> R.string.gpu_system_remove_session
+                component.pending -> R.string.gpu_system_remove_pending
+                component.previous -> R.string.gpu_system_remove_rollback
+                component.rowId == selectedSystem?.rowId -> R.string.gpu_system_remove_active
+                !removable -> R.string.gpu_system_remove_required
+                else -> null
+            }
             DriverRow(
                 component.rowId,
-                activity.getString(R.string.gpu_system_driver, systemDriverName) + " " + component.version,
+                systemComponentTitle(activity, systemDriverName, component.version.takeUnless { component.legacy }),
                 listOfNotNull(
-                    component.repository?.let { "$it ${component.tag.orEmpty()}".trim() },
-                    "${component.sha256.take(12)}${if (component.legacy) " · local" else ""}",
+                    if (component.legacy) activity.getString(R.string.gpu_system_legacy_detail) else component.repository,
+                    protection?.let(activity::getString),
                 ).joinToString(" · "),
-                false,
-                DriverRow.DOWNLOADED,
+                removable,
+                if (component.legacy) DriverRow.LEGACY else DriverRow.DOWNLOADED,
             )
         }
         val defaultRow = DriverRow(
@@ -179,21 +206,22 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
             else listOf(defaultRow) + importedRows
         val chosenLinux = SessionPrefs.linuxDriver(activity)
         linuxSelected = if (systemProfile != null && chosenLinux.isEmpty()) {
-            installedSystem.firstOrNull { it.pending }?.rowId ?: installedSystem.firstOrNull { it.active }?.rowId ?: ""
+            selectedSystem?.rowId.orEmpty()
         } else chosenLinux
         mode = SessionPrefs.gpuDriverMode(activity)
         val td = TurnipDriver(activity)
         val auto = td.autoId()
         androidRows = buildList {
             add(DriverRow(
-                TurnipDriver.AUTO, activity.getString(R.string.gpu_auto_by_gpu),
-                if (auto == "system") activity.getString(R.string.drivers_system_vulkan) else activity.getString(R.string.drivers_bundled, td.displayName(auto)),
+                TurnipDriver.AUTO, activity.getString(if (systemGpu) R.string.gpu_android_system_display else R.string.gpu_auto_by_gpu),
+                if (systemGpu) activity.getString(R.string.gpu_provided_by_android)
+                else if (auto == "system") activity.getString(R.string.drivers_system_vulkan) else activity.getString(R.string.drivers_bundled, td.displayName(auto)),
                 false,
             ))
-            for (id in td.visibleBundled()) add(DriverRow(id, td.displayName(id), td.driverVersion(id), true, DriverRow.BUNDLED))
+            if (!systemGpu) for (id in td.visibleBundled()) add(DriverRow(id, td.displayName(id), td.driverVersion(id), true, DriverRow.BUNDLED))
             for (id in td.enumerateImported()) add(bundleRow(id, linux = false) ?: DriverRow(id, td.displayName(id), td.driverVersion(id), true, origin(id)))
         }
-        canRestoreBundled = td.hiddenBundled().isNotEmpty()
+        canRestoreBundled = !systemGpu && td.hiddenBundled().isNotEmpty()
         androidSelected = SessionPrefs.androidDriver(activity)
         activeBundle = DriverBundle.active(activity)?.label
         restartPending = CompositorHost.isStarted && CompositorHost.displayChoice.let { it != null && it != androidSelected }
@@ -248,9 +276,14 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
         mode = when {
             auto -> SessionPrefs.GPU_DRIVERS_AUTO
             mix -> SessionPrefs.GPU_DRIVERS_MIX
+            systemGpu -> SessionPrefs.GPU_DRIVERS_PAIR
             else -> SessionPrefs.GPU_DRIVERS_MANUAL
         }
         SessionPrefs.setGpuDriverMode(activity, mode)
+        if (systemGpu && mode == SessionPrefs.GPU_DRIVERS_PAIR) {
+            SessionPrefs.setAndroidDriver(activity, TurnipDriver.AUTO)
+            SessionPrefs.setLinuxDriver(activity, "")
+        }
         autoStatus = ""
         if (auto) ensureAuto(force = false)
     }
@@ -261,6 +294,8 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
     }
 
     fun sourcesChanged() {
+        systemRefreshProblem = null
+        if (systemGpu) autoStatus = ""
         systemProfile?.let { systemCatalog = SystemVulkanComponentStore.cached(activity, it) }
         refreshDrivers()
     }
@@ -291,26 +326,29 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
         if (systemGpu) {
             SessionPrefs.ensureSystemVulkanAutoDrivers(activity)
             val profile = systemProfile ?: return
-            if (!SystemVulkanDriver.isAvailable()) {
-                autoStatus = activity.getString(
-                    R.string.drivers_none_to_set,
-                    "$systemDriverName system Vulkan device is unavailable",
-                )
-                refreshDrivers()
-                return
+            val action = systemAutoAction(
+                available = SystemVulkanDriver.isAvailable(),
+                ready = SystemVulkanComponentStore.isReady(activity, profile),
+                online = com.droiddeck.launcher.frontend.AutoComponents.isOnline(activity),
+                constrained = com.droiddeck.launcher.frontend.AutoComponents.constrained(activity),
+                refreshDue = force || releasesStale(), force = force,
+            )
+            when (action) {
+                SystemAutoAction.UNAVAILABLE -> {
+                    autoStatus = activity.getString(R.string.drivers_none_to_set, "$systemDriverName system Vulkan device is unavailable")
+                    refreshDrivers()
+                }
+                SystemAutoAction.USE_INSTALLED, SystemAutoAction.REFRESH_AVAILABLE -> {
+                    autoStatus = activity.getString(if (gpu.family == GpuInfo.Family.MALI || gpu.family == GpuInfo.Family.XCLIPSE) R.string.drivers_system_experimental_builtin else R.string.drivers_system_builtin, systemDriverName)
+                    refreshDrivers()
+                    if (action == SystemAutoAction.REFRESH_AVAILABLE) checkLatestSystem(profile)
+                }
+                SystemAutoAction.WAIT_FOR_NETWORK -> {
+                    autoStatus = activity.getString(R.string.drivers_auto_waits_for_network, systemDriverName, "")
+                    refreshDrivers()
+                }
+                SystemAutoAction.INSTALL_PINNED -> installAutomaticSystem(profile)
             }
-            if (SystemVulkanComponentStore.isReady(activity, profile)) {
-                autoStatus = activity.getString(if (gpu.family == GpuInfo.Family.MALI || gpu.family == GpuInfo.Family.XCLIPSE) R.string.drivers_system_experimental_builtin else R.string.drivers_system_builtin, systemDriverName)
-                refreshDrivers()
-                return
-            }
-            if (!com.droiddeck.launcher.frontend.AutoComponents.isOnline(activity) ||
-                (!force && com.droiddeck.launcher.frontend.AutoComponents.constrained(activity))) {
-                autoStatus = activity.getString(R.string.drivers_auto_waits_for_network, systemDriverName, "")
-                refreshDrivers()
-                return
-            }
-            installAutomaticSystem(profile)
             return
         }
         AutoDriverTrial.rollbackDue(activity)?.let { trial ->
@@ -523,8 +561,6 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
             }.onFailure { error ->
                 android.widget.Toast.makeText(activity, error.message, android.widget.Toast.LENGTH_LONG).show()
             }
-            pairModeOpen = false
-            setMode(auto = false, mix = true)
             refreshDrivers()
             return
         }
@@ -550,6 +586,25 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
     }
 
     fun deleteDriver(id: String, linux: Boolean) {
+        if (linux && SystemVulkanComponentStore.rowDigest(id) != null) {
+            val profile = systemProfile ?: return
+            val digest = SystemVulkanComponentStore.rowDigest(id) ?: return
+            Thread({
+                val problem = runCatching {
+                    val stopped = !SessionState.running && SessionState.phase == SessionPhase.IDLE &&
+                        !OrphanReaper.hasOtherProcesses()
+                    SystemVulkanComponentStore.remove(activity, profile, digest, stopped)
+                }.exceptionOrNull()
+                ui.post {
+                    android.widget.Toast.makeText(
+                        activity, problem?.message ?: activity.getString(R.string.drivers_deleted, systemDriverName),
+                        android.widget.Toast.LENGTH_LONG,
+                    ).show()
+                    refreshDrivers()
+                }
+            }, "remove-system-vulkan").start()
+            return
+        }
         val bundle = DriverBundle.containing(activity, id, linux)
         if (bundle != null) {
             DriverBundle.remove(activity, bundle)
@@ -574,27 +629,27 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
     fun refreshReleaseRows() {
         val profile = systemProfile
         if (profile != null) {
-            systemCatalog = SystemVulkanComponentStore.cached(activity, profile)
+            val cached = SystemVulkanComponentStore.cached(activity, profile)
+            val visible = RepositorySources.visible(activity, SystemVulkanComponentStore.scope(profile),
+                SystemVulkanComponentStore.sourceBuiltIns()).mapTo(HashSet()) { it.repository }
+            systemCatalog = cached.copy(failed = systemCatalog.failed.filter { it in visible }, rateLimited = systemCatalog.rateLimited)
             val installed = SystemVulkanComponentStore.installed(activity, profile).mapTo(HashSet()) { it.sha256 }
             linuxDownloads = systemCatalog.candidates.filterNot { it.sha256 in installed }.map { candidate ->
                 val mb = activity.getString(R.string.common_size_mb, candidate.size / 1_048_576.0)
                 com.droiddeck.launcher.ui.DownloadRow(
                     candidate.key,
-                    "${candidate.version} · ${candidate.repository}",
-                    "${candidate.tag} · $mb",
+                    systemComponentTitle(activity, systemDriverName, candidate.version),
+                    listOfNotNull(candidate.repository, systemComponentPublished(activity, candidate.publishedAt), mb).joinToString(" · "),
                     releaseProgress[candidate.key],
                 )
             }
             androidDownloads = emptyList()
-            if (!releaseChecking) releaseStatus = when {
+            if (!releaseChecking) releaseStatus = systemRefreshProblem ?: when {
+                systemCatalog.failed.isNotEmpty() -> activity.getString(R.string.upd_couldnt_check, systemCatalog.failed.joinToString())
                 systemCatalog.checkedAt == 0L -> activity.getString(R.string.drivers_not_checked)
-                systemCatalog.failed.isEmpty() -> activity.getString(
-                    R.string.drivers_release_status,
-                    systemCatalog.candidates.firstOrNull()?.version.orEmpty(), ago(systemCatalog.checkedAt),
-                )
                 else -> activity.getString(
-                    R.string.drivers_release_status_failed,
-                    systemCatalog.candidates.firstOrNull()?.version.orEmpty(), systemCatalog.failed.joinToString(), ago(systemCatalog.checkedAt),
+                    R.string.drivers_release_status,
+                    systemCatalog.candidates.firstOrNull()?.version?.let { systemComponentVersion(activity, it) }.orEmpty(), ago(systemCatalog.checkedAt),
                 )
             }
             return
@@ -689,6 +744,8 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
 
     private fun checkLatestSystem(profile: SystemVulkanDriver.Profile) {
         releaseChecking = true
+        systemRefreshProblem = null
+        autoStatus = ""
         releaseStatus = activity.getString(R.string.drivers_checking_sources)
         Thread({
             val result = runCatching { SystemVulkanComponentStore.refresh(activity, profile) }
@@ -697,6 +754,7 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
                 else result.exceptionOrNull()?.let { GitHubArtifacts.failureMessage(activity, it) }
             ui.post {
                 releaseChecking = false
+                systemRefreshProblem = problem?.let { activity.getString(R.string.upd_couldnt_check, it) }
                 result.onSuccess { refreshed ->
                     val current = SystemVulkanComponentStore.cached(activity, profile)
                     systemCatalog = current.copy(failed = refreshed.failed.filter { failed ->
@@ -718,7 +776,9 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
     private fun downloadSystemComponent(candidate: SystemVulkanComponentStore.Candidate) {
         val profile = systemProfile ?: return
         if (releaseProgress.containsKey(candidate.key)) return
-        releaseProgress[candidate.key] = 0
+        systemRefreshProblem = null
+        autoStatus = ""
+        releaseProgress[candidate.key] = -1
         refreshReleaseRows()
         Thread({
             val problem = runCatching {
@@ -729,10 +789,11 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
             ui.post {
                 releaseProgress.remove(candidate.key)
                 problem?.let { Log.w(TAG, "System Vulkan component download", it) }
+                systemRefreshProblem = problem?.let { activity.getString(R.string.comp_download_failed, it.message) }
                 android.widget.Toast.makeText(
                     activity,
                     problem?.let { activity.getString(R.string.comp_download_failed, it.message) }
-                        ?: activity.getString(R.string.drivers_installed_pick, candidate.version),
+                        ?: activity.getString(R.string.drivers_installed_pick, systemComponentTitle(activity, systemDriverName, candidate.version)),
                     android.widget.Toast.LENGTH_LONG,
                 ).show()
                 refreshDrivers()
@@ -742,6 +803,7 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
 
     private fun installAutomaticSystem(profile: SystemVulkanDriver.Profile) {
         releaseChecking = true
+        systemRefreshProblem = null
         autoStatus = activity.getString(R.string.drivers_checking_latest)
         Thread({
             val result = runCatching {
@@ -753,10 +815,11 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
                 releaseChecking = false
                 result.onSuccess { candidate ->
                     systemCatalog = SystemVulkanComponentStore.cached(activity, profile)
-                    autoStatus = activity.getString(R.string.drivers_updated_to, systemDriverName, candidate.version)
+                    autoStatus = activity.getString(R.string.drivers_updated_to, systemDriverName, systemComponentVersion(activity, candidate.version))
                 }.onFailure { error ->
                     Log.w(TAG, "automatic System Vulkan component", error)
                     autoStatus = activity.getString(R.string.upd_couldnt_check, error.message.orEmpty())
+                    systemRefreshProblem = autoStatus
                 }
                 refreshDrivers()
             }
@@ -768,6 +831,30 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
         const val RELEASE_CHECK_INTERVAL_MS = 3_600_000L
     }
 }
+
+internal enum class SystemAutoAction { UNAVAILABLE, USE_INSTALLED, REFRESH_AVAILABLE, WAIT_FOR_NETWORK, INSTALL_PINNED }
+
+internal fun systemAutoAction(
+    available: Boolean, ready: Boolean, online: Boolean, constrained: Boolean, refreshDue: Boolean, force: Boolean,
+): SystemAutoAction = when {
+    !available -> SystemAutoAction.UNAVAILABLE
+    ready -> if (online && refreshDue) SystemAutoAction.REFRESH_AVAILABLE else SystemAutoAction.USE_INSTALLED
+    !online || (constrained && !force) -> SystemAutoAction.WAIT_FOR_NETWORK
+    else -> SystemAutoAction.INSTALL_PINNED
+}
+
+internal fun systemComponentVersion(context: Context, version: String): String =
+    if (version.matches(Regex("[0-9a-fA-F]{7,64}"))) context.getString(R.string.gpu_system_build, version.take(8))
+    else context.getString(R.string.gpu_system_version, version)
+
+internal fun systemComponentTitle(context: Context, profile: String, version: String?): String =
+    context.getString(R.string.gpu_system_runtime_title, profile) +
+        (version?.let { " · ${systemComponentVersion(context, it)}" } ?: "")
+
+internal fun systemComponentPublished(context: Context, publishedAt: String): String? = runCatching {
+    val date = java.util.Date.from(java.time.Instant.parse(publishedAt))
+    context.getString(R.string.gpu_system_published, android.text.format.DateFormat.getDateFormat(context).format(date))
+}.getOrNull()
 
 internal fun releaseAssetById(assets: List<TurnipReleases.Asset>, id: String): TurnipReleases.Asset? =
     assets.firstOrNull { it.id == id }

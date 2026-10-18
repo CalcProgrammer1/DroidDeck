@@ -68,6 +68,27 @@ class SystemVulkanManifestTest {
         assertTrue(runCatching { SystemVulkanManifest.bundle(manifest.toString().toByteArray(), expected) }.isFailure)
     }
 
+    @Test fun archiveDirectoriesAcceptProducerTrailingSlashWithoutWeakeningPathValidation() {
+        assertEquals("dxvk-mali", SystemVulkanManifest.archivePath("dxvk-mali/", isDirectory = true))
+        assertEquals(
+            "dxvk-mali/aarch64-windows",
+            SystemVulkanManifest.archivePath("dxvk-mali/aarch64-windows/", isDirectory = true),
+        )
+        assertEquals("lib", SystemVulkanManifest.archivePath("lib", isDirectory = true))
+
+        listOf(
+            "../escape/",
+            "/absolute/",
+            "dxvk-mali//",
+            "dxvk-mali/../escape/",
+            "dxvk-mali\\escape/",
+            "./dxvk-mali/",
+        ).forEach { path ->
+            assertTrue(path, runCatching { SystemVulkanManifest.archivePath(path, isDirectory = true) }.isFailure)
+        }
+        assertTrue(runCatching { SystemVulkanManifest.archivePath("dxvk-mali/", isDirectory = false) }.isFailure)
+    }
+
     private fun identity() = JSONObject().put("schema", 1).put("component", "system-vulkan")
         .put("variant", "powervr").put("version", "1")
         .put("requires", JSONObject().put("componentApi", 1).put("abi", "arm64-v8a").put("minSdk", 26))

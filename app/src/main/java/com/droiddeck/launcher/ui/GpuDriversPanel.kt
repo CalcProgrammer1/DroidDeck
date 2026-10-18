@@ -122,6 +122,8 @@ class GpuDriversState(
     val autoStatus: String = "",
     val releaseStatus: String = "",
     val checking: Boolean = false,
+    val systemRows: List<DriverRow> = emptyList(),
+    val systemDownloads: List<DownloadRow> = emptyList(),
     val linuxRows: List<DriverRow> = emptyList(),
     val linuxSelected: String = "",
     val androidRows: List<DriverRow> = emptyList(),
@@ -265,9 +267,9 @@ internal fun GpuDriversBody(
             modes.indices.forEach { choice(it, Modifier.weight(1f).fillMaxHeight()) }
         }
         when (gpu.mode) {
-            GPU_MODE_AUTO -> AutoBody(gpu)
+            GPU_MODE_AUTO -> AutoBody(gpu, actions)
             GPU_MODE_PAIR -> PairBody(gpu, actions)
-            else -> MixBody(single, actions, slotFocus, onOpenSlot)
+            else -> MixBody(gpu.systemGpu, single, actions, slotFocus, onOpenSlot)
         }
     }
 }
@@ -337,7 +339,7 @@ private fun RestartBanner(target: String, canRestart: Boolean, afterLater: Focus
 }
 
 @Composable
-private fun AutoBody(gpu: GpuDriversState) {
+private fun AutoBody(gpu: GpuDriversState, actions: GpuDriversActions) {
     val colors = MaterialTheme.colorScheme
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         PanelTitle(
@@ -348,8 +350,13 @@ private fun AutoBody(gpu: GpuDriversState) {
             }, gpu.gpuName),
             if (gpu.systemGpu) stringResource(R.string.gpu_auto_system_hint) else stringResource(R.string.gpu_auto_reason, gpu.gpuFamily),
         )
-        if (!gpu.systemGpu) gpu.activePair?.let { p -> PanelRow(p.name, "${p.version} · ${p.detail}", selected = true, onClick = null) }
-        if (gpu.autoStatus.isNotEmpty()) Text(gpu.autoStatus, fontSize = 13.sp, color = colors.onSurfaceVariant)
+        if (gpu.systemGpu) {
+            Text(stringResource(R.string.gpu_system_auto_policy), fontSize = 13.sp, color = colors.onSurfaceVariant)
+            SystemBundleBody(gpu, actions)
+        } else {
+            gpu.activePair?.let { p -> PanelRow(p.name, "${p.version} · ${p.detail}", selected = true, onClick = null) }
+            if (gpu.autoStatus.isNotEmpty()) Text(gpu.autoStatus, fontSize = 13.sp, color = colors.onSurfaceVariant)
+        }
     }
 }
 
@@ -359,6 +366,14 @@ private fun PairBody(gpu: GpuDriversState, actions: GpuDriversActions) {
     val pal = LocalPalette.current
     var showAll by rememberSaveable { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (gpu.systemGpu) {
+            PanelTitle(
+                stringResource(R.string.gpu_system_runtime_title, gpu.systemDriverName),
+                stringResource(R.string.gpu_system_pair_hint),
+            )
+            SystemBundleBody(gpu, actions)
+            return@Column
+        }
         PanelTitle(stringResource(R.string.gpu_pair_title), stringResource(R.string.gpu_pair_hint))
         val rows = gpu.pairs.filter { (it.installed || it.complete) && (it.suits || showAll) }
         if (rows.isEmpty()) Text(
@@ -384,7 +399,7 @@ private fun PairBody(gpu: GpuDriversState, actions: GpuDriversActions) {
 }
 
 @Composable
-private fun MixBody(single: Boolean, actions: GpuDriversActions, slotFocus: Map<String, FocusRequester>, onOpenSlot: (String, Rect) -> Unit) {
+private fun MixBody(systemGpu: Boolean, single: Boolean, actions: GpuDriversActions, slotFocus: Map<String, FocusRequester>, onOpenSlot: (String, Rect) -> Unit) {
     val pal = LocalPalette.current
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         PanelTitle(stringResource(R.string.gpu_mix_title), stringResource(R.string.gpu_mix_hint))
@@ -401,8 +416,61 @@ private fun MixBody(single: Boolean, actions: GpuDriversActions, slotFocus: Map<
         }
         if (single) Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { buttons(Modifier.fillMaxWidth()) }
         else Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) { buttons(Modifier.weight(1f)) }
-        FocusText(stringResource(R.string.comp_import_zip), pal.signal, onClick = actions.onImportZip)
+        if (!systemGpu) FocusText(stringResource(R.string.comp_import_zip), pal.signal, onClick = actions.onImportZip)
     }
+}
+
+@Composable
+private fun SystemBundleBody(gpu: GpuDriversState, actions: GpuDriversActions) {
+    val colors = MaterialTheme.colorScheme
+    var confirm by remember { mutableStateOf<DriverRow?>(null) }
+    SettingsGroup(stringResource(R.string.driver_installed)) {
+        if (gpu.systemRows.isEmpty()) Text(
+            stringResource(R.string.gpu_system_missing),
+            fontSize = 12.5.sp,
+            color = colors.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 14.dp),
+        )
+        for (row in gpu.systemRows) InstalledRow(
+            row = row,
+            selected = row.id == gpu.linuxSelected,
+            onSelect = { actions.onSelectLinux(row.id) },
+            onDelete = { confirm = row },
+        )
+    }
+    SettingsGroup(stringResource(R.string.gpu_system_available_builds)) {
+        if (gpu.systemDownloads.isEmpty()) Text(
+            stringResource(if (gpu.checking) R.string.common_checking else R.string.gpu_system_no_available_builds),
+            fontSize = 12.5.sp,
+            color = colors.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 14.dp),
+        )
+        for (download in gpu.systemDownloads) SettingsRow(download.label, download.detail) {
+            val progress = download.progress
+            if (progress == null) SecondaryButton(stringResource(R.string.common_download)) { actions.onDownloadDriver(download.key) }
+            else Column(horizontalAlignment = Alignment.End, modifier = Modifier.width(120.dp)) {
+                Text(
+                    if (progress < 0) stringResource(R.string.gpu_system_downloading) else "$progress%",
+                    fontSize = 12.sp,
+                    color = colors.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
+                if (progress < 0) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                else LinearProgressIndicator(progress = { progress / 100f }, modifier = Modifier.fillMaxWidth())
+            }
+        }
+    }
+    listOf(gpu.autoStatus, gpu.releaseStatus).filter { it.isNotEmpty() }.distinct().forEach { status ->
+        Text(status, fontSize = 13.sp, color = colors.onSurfaceVariant)
+    }
+    if (gpu.busy != null && gpu.systemDownloads.none { it.progress != null }) {
+        if (gpu.percent < 0) LinearProgressIndicator(Modifier.fillMaxWidth())
+        else LinearProgressIndicator(progress = { gpu.percent / 100f }, modifier = Modifier.fillMaxWidth())
+    }
+    confirm?.let { row -> DriverDeleteDialog(row, gpu.linuxSelected, onDismiss = { confirm = null }) {
+        confirm = null
+        actions.onRemoveLinux(row.id)
+    } }
 }
 
 internal const val SLOT_DISPLAY = "panel"
