@@ -192,6 +192,7 @@ android {
         unitTests.returnDefaultValues = true
         unitTests.includeAndroidResources = true
         unitTests.all {
+            maxHeapSize = '1g'
             def logTarget = providers.systemProperty('robolectric.logging').orNull
             if (logTarget != null) systemProperty 'robolectric.logging', logTarget
         }
