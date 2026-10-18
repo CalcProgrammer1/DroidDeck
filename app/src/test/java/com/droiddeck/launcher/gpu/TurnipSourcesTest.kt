@@ -50,12 +50,69 @@ class TurnipSourcesTest {
             assertTrue(partial.rateLimited)
             assertEquals(1, partial.assets.size)
             assertEquals(2, partial.failed.size)
-            assertEquals(3, calls)
+            assertEquals(4, calls)
             val warmFailure = TurnipReleases.refresh(context)
             assertTrue(warmFailure.rateLimited)
             assertEquals(partial.assets.single().id, warmFailure.assets.single().id)
             assertEquals(partial.checkedAt, warmFailure.checkedAt)
-            assertEquals(3, calls)
+            assertEquals(4, calls)
+        } finally {
+            GitHubArtifacts.openConnection = production
+            GitHubArtifacts.clearRateLimits()
+        }
+    }
+
+    @Test
+    fun autoPicksUseOnlyTheFixedOfficialUrlAndKeepTheLastValidManifest() {
+        val context = RuntimeEnvironment.getApplication()
+        val repo = TurnipReleases.sourceBuiltIns().first()
+        TurnipReleases.saveSources(context, TurnipReleases.sources(context).map { it.copy(hidden = it.repository != repo) })
+        val manifest = """{"schemaVersion":1,"rules":[{"families":["A7XX"],"prefer":["wn-p"]}]}"""
+        val production = GitHubArtifacts.openConnection
+        var manifestFails = false
+        val requested = ArrayList<String>()
+        try {
+            GitHubArtifacts.clearRateLimits()
+            GitHubArtifacts.openConnection = { url ->
+                requested.add(url.toString())
+                val body = when {
+                    url.path == "/repos/$repo" -> JSONObject().put("id", 1).put("full_name", repo).toString()
+                    url.path == "/repositories/1/releases" -> "[]"
+                    url.toString() == AutoPicks.URL -> manifest
+                    else -> error("Unexpected URL $url")
+                }
+                object : HttpURLConnection(url) {
+                    override fun connect() {}
+                    override fun disconnect() {}
+                    override fun usingProxy() = false
+                    override fun getResponseCode() = if (manifestFails && url.toString() == AutoPicks.URL) 500 else 200
+                    override fun getInputStream() = ByteArrayInputStream(body.toByteArray())
+                }
+            }
+
+            TurnipReleases.refresh(context)
+            assertEquals(listOf(DriverPairs.WN_PERFORMANCE), TurnipReleases.autoPicks(context).single().prefer)
+            assertTrue(AutoPicks.URL in requested)
+
+            manifestFails = true
+            TurnipReleases.refresh(context)
+            assertEquals(listOf(DriverPairs.WN_PERFORMANCE), TurnipReleases.autoPicks(context).single().prefer)
+        } finally {
+            GitHubArtifacts.openConnection = production
+            GitHubArtifacts.clearRateLimits()
+        }
+    }
+
+    @Test
+    fun hidingEveryDriverSourceSkipsAllMetadataRequests() {
+        val context = RuntimeEnvironment.getApplication()
+        TurnipReleases.saveSources(context, TurnipReleases.sources(context).map { it.copy(hidden = true) })
+        val production = GitHubArtifacts.openConnection
+        var requested = false
+        try {
+            GitHubArtifacts.openConnection = { url -> requested = true; error("Unexpected metadata request: $url") }
+            assertTrue(TurnipReleases.refresh(context).assets.isEmpty())
+            assertFalse(requested)
         } finally {
             GitHubArtifacts.openConnection = production
             GitHubArtifacts.clearRateLimits()

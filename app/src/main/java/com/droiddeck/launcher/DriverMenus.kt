@@ -13,6 +13,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableIntStateOf
 import com.droiddeck.launcher.gpu.AutoDriverTrial
+import com.droiddeck.launcher.gpu.AutoPicks
 import com.droiddeck.launcher.gpu.DriverBundle
 import com.droiddeck.launcher.gpu.DriverPairs
 import com.droiddeck.launcher.gpu.GpuInfo
@@ -184,7 +185,7 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
         val lm = LinuxVulkanDriverManager(activity)
         val td = TurnipDriver(activity)
         val pairs = DriverPairs.from(TurnipReleases.cached(activity))
-        val recommended = if (QuestExperimental.isSupported()) null else DriverPairs.recommendedKey(gpu, pairs)
+        val recommended = if (QuestExperimental.isSupported()) null else recommendedKey(pairs)
         pairRows = pairs.map { p ->
             val bundle = p.bundle?.let { installedBundle(it) }
             val displayId = if (p.bundle != null) bundle?.androidId else p.display?.let { TurnipReleases.installedId(activity, it, td::isInstalled) }
@@ -200,6 +201,11 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
             )
         }.sortedByDescending { it.recommended }
     }
+
+    private fun recommendedKey(pairs: List<DriverPairs.DriverPair>) = DriverPairs.recommendedKey(
+        gpu, pairs, TurnipReleases.autoPicks(activity), AutoDriverTrial.bad(activity),
+        blob = AutoPicks.blobVersion(com.droiddeck.launcher.gpu.VulkanInfo.cachedOrNull()?.get("driver_version")),
+    )
 
     fun chooseMode(next: String) {
         pairModeOpen = next == GPU_MODE_PAIR
@@ -272,13 +278,14 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
             val problem = if (rateLimited) activity.getString(R.string.sources_github_rate_limited)
                 else result?.exceptionOrNull()?.let { GitHubArtifacts.failureMessage(activity, it) }
             val holdBack = !force && com.droiddeck.launcher.frontend.AutoComponents.constrained(activity)
+            runCatching { com.droiddeck.launcher.gpu.VulkanInfo.query() }
             ui.post {
                 releaseChecking = false
                 refreshReleaseRows()
                 refreshPairs()
                 if (force && rateLimited) android.widget.Toast.makeText(activity, problem, android.widget.Toast.LENGTH_LONG).show()
                 val pairs = DriverPairs.from(TurnipReleases.cached(activity))
-                val key = DriverPairs.recommendedKey(gpu, pairs)
+                val key = recommendedKey(pairs)
                 val pair = pairs.firstOrNull { it.key == key }
                 val row = pairRows.firstOrNull { it.key == key }
                 when {
