@@ -14,6 +14,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 object RepositorySources {
+    internal val lock = Any()
     private const val MAX_POLICY_BYTES = 128 * 1024
     private const val MAX_SOURCES = 100
     private const val MAX_BINDINGS = 1000
@@ -68,18 +69,18 @@ object RepositorySources {
         return Source(digest(canonical), canonical, false, hidden)
     }
 
-    @JvmStatic @Synchronized fun list(context: Context, key: String, builtIns: List<String>): List<Source> =
-        read(context, key, builtIns).rows.toList()
+    @JvmStatic fun list(context: Context, key: String, builtIns: List<String>): List<Source> =
+        synchronized(lock) { read(context, key, builtIns).rows.toList() }
 
-    @JvmStatic @Synchronized fun visible(context: Context, key: String, builtIns: List<String>): List<Source> =
-        read(context, key, builtIns).rows.filterNot { it.hidden }
+    @JvmStatic fun visible(context: Context, key: String, builtIns: List<String>): List<Source> =
+        synchronized(lock) { read(context, key, builtIns).rows.filterNot { it.hidden } }
 
-    @JvmStatic @Synchronized fun generation(context: Context, key: String, builtIns: List<String>): Long =
-        read(context, key, builtIns).generation
+    @JvmStatic fun generation(context: Context, key: String, builtIns: List<String>): Long =
+        synchronized(lock) { read(context, key, builtIns).generation }
 
-    @JvmStatic @Synchronized fun save(
+    @JvmStatic fun save(
         context: Context, key: String, builtIns: List<String>, rows: List<Source>,
-    ): List<Source> {
+    ): List<Source> = synchronized(lock) {
         require(rows.size <= MAX_SOURCES) { "Too many repository sources" }
         val defaults = defaults(builtIns)
         val previous = read(context, key, builtIns)
@@ -97,21 +98,21 @@ object RepositorySources {
         }
         val nextGeneration = maxOf(System.currentTimeMillis(), previous.generation.coerceAtLeast(0) + 1)
         write(context, key, Policy(nextGeneration, normalized, previous.bindings))
-        return normalized
+        normalized
     }
 
-    @JvmStatic @Synchronized fun isCurrent(
+    @JvmStatic fun isCurrent(
         context: Context, key: String, builtIns: List<String>, sourceId: String, generation: Long,
-    ): Boolean {
+    ): Boolean = synchronized(lock) {
         val policy = read(context, key, builtIns)
-        return !policy.damaged && policy.generation == generation &&
+        !policy.damaged && policy.generation == generation &&
             policy.rows.any { it.id == sourceId && !it.hidden }
     }
 
-    @JvmStatic @Synchronized fun bind(
+    @JvmStatic fun bind(
         context: Context, key: String, builtIns: List<String>, source: Source,
         repositoryId: Long, expectedGeneration: Long,
-    ): Source {
+    ): Source = synchronized(lock) {
         require(repositoryId > 0) { "Invalid GitHub repository identity" }
         val policy = read(context, key, builtIns)
         val row = policy.rows.firstOrNull { it.id == source.id && it.repository == source.repository && !it.hidden }
@@ -131,7 +132,7 @@ object RepositorySources {
                 bindings = policy.bindings + (row.repository to repositoryId),
             ))
         }
-        return updated
+        updated
     }
 
     @JvmStatic fun cacheDirectory(context: Context, key: String, source: Source): File {
@@ -151,14 +152,14 @@ object RepositorySources {
         }
     }
 
-    @Synchronized internal fun <T> whileCurrent(
+    internal fun <T> whileCurrent(
         context: Context, key: String, builtIns: List<String>, sourceId: String,
         generation: Long, action: () -> T,
-    ): T {
+    ): T = synchronized(lock) {
         if (!isCurrent(context, key, builtIns, sourceId, generation)) {
             throw IOException("Repository source changed while checking")
         }
-        return action()
+        action()
     }
 
     private fun defaults(builtIns: List<String>): List<Source> {
