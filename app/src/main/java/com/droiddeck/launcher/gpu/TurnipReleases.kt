@@ -6,16 +6,21 @@ import com.droiddeck.launcher.R
 import com.droiddeck.launcher.artifact.GitHubArtifacts
 import com.droiddeck.launcher.artifact.RepositorySources
 import android.content.Context
+import android.util.Log
 import com.droiddeck.launcher.core.FileUtils
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.net.URI
 
 object TurnipReleases {
+    private const val TAG = "TurnipReleases"
     private const val PREFS = "turnip_releases"
     private const val KEY_RELEASE = "latest"
     private const val KEY_DOWNLOADS = "downloads"
+    private const val KEY_PICKS = "autoPicks"
+    private const val MAX_AUTO_PICKS_BYTES = 256 * 1024
 
     const val SOURCE_SCOPE = "gpu/turnip"
 
@@ -71,6 +76,9 @@ object TurnipReleases {
     @JvmStatic fun saveSources(context: Context, rows: List<RepositorySources.Source>): List<RepositorySources.Source> =
         RepositorySources.save(context, SOURCE_SCOPE, sourceBuiltIns(), rows)
 
+    fun autoPicks(context: Context): List<AutoPicks.Rule> =
+        AutoPicks.parse(prefs(context).getString(KEY_PICKS, null)) ?: AutoPicks.BUILT_IN
+
     fun cached(context: Context): Check? {
         val raw = prefs(context).getString(KEY_RELEASE, null) ?: return null
         val visible = RepositorySources.visible(context, SOURCE_SCOPE, sourceBuiltIns()).map { it.id }.toSet()
@@ -86,7 +94,8 @@ object TurnipReleases {
         val failed = ArrayList<String>()
         var lastError: Exception? = null
         var rateLimited = false
-        for (configured in RepositorySources.visible(context, SOURCE_SCOPE, sourceBuiltIns())) {
+        val visibleSources = RepositorySources.visible(context, SOURCE_SCOPE, sourceBuiltIns())
+        for (configured in visibleSources) {
             try {
                 val releases = GitHubArtifacts.refreshReleases(context, SOURCE_SCOPE, sourceBuiltIns(), configured)
                 val source = RepositorySources.visible(context, SOURCE_SCOPE, sourceBuiltIns()).single { it.id == configured.id }
@@ -127,10 +136,17 @@ object TurnipReleases {
                 }
             }
         }
-        if (failed.isNotEmpty() && failed.size == RepositorySources.visible(context, SOURCE_SCOPE, sourceBuiltIns()).size && assets.length() == 0) {
+        if (failed.isNotEmpty() && failed.size == visibleSources.size && assets.length() == 0) {
             throw lastError ?: IOException("no source answered")
         }
-        val allFailed = failed.isNotEmpty() && failed.size == RepositorySources.visible(context, SOURCE_SCOPE, sourceBuiltIns()).size
+        val allFailed = failed.isNotEmpty() && failed.size == visibleSources.size
+        if (visibleSources.isNotEmpty()) runCatching {
+            val expected = URI(AutoPicks.URL)
+            GitHubArtifacts.fetch(AutoPicks.URL, MAX_AUTO_PICKS_BYTES) { it == expected }.toString(Charsets.UTF_8)
+        }
+            .onFailure { Log.i(TAG, "auto picks: ${it.message}") }
+            .getOrNull()?.takeIf { AutoPicks.parse(it) != null }
+            ?.let { prefs(context).edit().putString(KEY_PICKS, it).apply() }
         val stored = JSONObject().put("assets", assets).put("latest", latest)
             .put("failed", JSONArray(failed)).put("checkedAt", if (allFailed) previous?.checkedAt ?: 0L else System.currentTimeMillis())
         prefs(context).edit().putString(KEY_RELEASE, stored.toString()).apply()
