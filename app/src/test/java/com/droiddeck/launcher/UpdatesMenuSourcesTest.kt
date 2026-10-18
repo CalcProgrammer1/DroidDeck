@@ -38,6 +38,9 @@ class UpdatesMenuSourcesTest {
     fun setUp() {
         GitHubArtifacts.clearRateLimits()
         activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        AppUpdates.applyInstalledSignerIdentity(
+            SelfInstaller.VerifiedIdentity(setOf(BuildConfig.RELEASE_SIGNER), emptySet()), true,
+        )
         menu = UpdatesMenu(activity, Handler(Looper.getMainLooper()))
         menu.start()
     }
@@ -47,6 +50,7 @@ class UpdatesMenuSourcesTest {
         menu.unregister()
         GitHubArtifacts.openConnection = productionConnection
         GitHubArtifacts.clearRateLimits()
+        AppUpdates.applyInstalledSignerIdentity(SelfInstaller.VerifiedIdentity(emptySet(), emptySet()), false)
     }
 
     @Test
