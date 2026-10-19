@@ -222,6 +222,9 @@ public final class LinuxRuntime {
                 bind(cmd, fake.getPath() + ":" + entry[1]);
             }
         }
+        if (unreadablePciDevice()) {
+            bind(cmd, new File(root, "etc/droiddeck/empty").getPath() + ":/sys/bus/pci/devices");
+        }
         if (SystemVulkanDriver.requiresRenderNode()) {
             bindSystemVulkanGpuNode(context, cmd);
         } else if (!SystemVulkanDriver.isSupportedGpu()) {
@@ -257,6 +260,15 @@ public final class LinuxRuntime {
         bind(cmd, dri.getPath() + ":/dev/dri");
         bind(cmd, node + ":" + node);
         android.util.Log.i("LinuxRuntime", "System Vulkan: exposing real " + name + " through a listable directory");
+    }
+
+    private static boolean unreadablePciDevice() {
+        File[] devices = new File("/sys/bus/pci/devices").listFiles();
+        if (devices == null) return false;
+        for (File device : devices) {
+            if (!new File(device, "vendor").canRead()) return true;
+        }
+        return false;
     }
 
     private static void bindGpuNode(Context context, List<String> cmd) {
