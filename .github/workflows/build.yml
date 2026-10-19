@@ -298,6 +298,9 @@ jobs:
               if count != 1:
                   raise SystemExit('Unexpected base version; review the preview update version')
           path.write_text(source)
+          Path('keystore/release-signer.sha256').write_text(
+              '80465aadce5c34a1d4f71ee4bd8cf7bcce64b5e7836e599f98d0b4f110e210c8\n'
+          )
           PY
 
       - name: Set the APK build label
