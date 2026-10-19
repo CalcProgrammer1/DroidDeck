@@ -19,10 +19,12 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import java.io.File
+import java.io.ByteArrayInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.lang.reflect.InvocationTargetException
 import java.nio.file.Files
+import java.net.HttpURLConnection
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -52,6 +54,90 @@ class SystemVulkanComponentStoreTest {
         val chosen = rows.map { it.copy(hidden = true) } + RepositorySources.source("Example/CustomDrivers")
         RepositorySources.save(app, SystemVulkanComponentStore.scope(profile), SystemVulkanComponentStore.sourceBuiltIns(), chosen)
         assertEquals(chosen, SystemVulkanComponentStore.initializeSources(app, profile))
+    }
+
+    @Test fun discoveryKeepsBothReleaseChannelsAndLegacyTagsThroughOfflineRefresh() {
+        val repository = "droid-deck/droiddeck"
+        val manifests = HashMap<String, ByteArray>()
+        fun release(id: Int, tag: String, prerelease: Boolean, variant: String = profile.id): JSONObject {
+            val prefix = "https://github.com/$repository/releases/download/$tag/"
+            val archiveName = "system-vulkan-$variant.tar.zst"
+            val sidecarName = "droiddeck-component-system-vulkan-$variant.json"
+            val archiveHash = id.toString(16).repeat(64)
+            val sidecar = JSONObject().put("schema", 1).put("component", "system-vulkan")
+                .put("variant", variant).put("version", "v0.$id.0")
+                .put("requires", JSONObject().put("componentApi", 1).put("abi", "arm64-v8a").put("minSdk", 26))
+                .put("artifact", JSONObject().put("name", archiveName).put("size", 12)
+                    .put("sha256", archiveHash).put("treeSha256", "e".repeat(64)))
+                .put("provenance", JSONObject().put("repository", repository).put("commit", "f".repeat(40))
+                    .put("buildUrl", "https://github.com/$repository/actions/runs/$id"))
+                .toString().toByteArray()
+            manifests[prefix + sidecarName] = sidecar
+            val assets = JSONArray()
+                .put(JSONObject().put("id", id * 2).put("name", archiveName).put("size", 12)
+                    .put("browser_download_url", prefix + archiveName).put("digest", "sha256:$archiveHash"))
+                .put(JSONObject().put("id", id * 2 + 1).put("name", sidecarName).put("size", sidecar.size)
+                    .put("browser_download_url", prefix + sidecarName)
+                    .put("digest", "sha256:${RepositorySources.sha256(sidecar)}"))
+            return JSONObject().put("id", id).put("tag_name", tag).put("prerelease", prerelease)
+                .put("published_at", "2026-10-0${id}T00:00:00Z").put("assets", assets)
+        }
+        val stable = release(1, "system-vulkan-powervr-v0.1.0", false)
+        val preview = release(2, "system-vulkan-powervr-v0.2.0-rc.1", true)
+        val legacy = release(3, "system-vulkan-old-shared-tag", true)
+        val releases = JSONArray().put(stable).put(preview).put(legacy)
+            .put(release(4, "system-vulkan-mali-v0.1.0", false, "mali"))
+            .put(release(5, "system-vulkan-powervr-v0.5.0", false).put("draft", true))
+        val transport = GitHubArtifacts.openConnection
+        try {
+            GitHubArtifacts.openConnection = { url ->
+                val body = if (url.host == "api.github.com") {
+                    if (url.path.endsWith("/releases")) releases.toString().toByteArray()
+                    else """{"id":12345,"full_name":"$repository"}""".toByteArray()
+                } else manifests.getValue(url.toString())
+                object : HttpURLConnection(url) {
+                    override fun connect() {}
+                    override fun disconnect() {}
+                    override fun usingProxy() = false
+                    override fun getResponseCode() = 200
+                    override fun getInputStream() = ByteArrayInputStream(body)
+                    override fun getContentLengthLong() = body.size.toLong()
+                }
+            }
+            val result = SystemVulkanComponentStore.refresh(app, profile)
+            assertTrue(result.failed.isEmpty())
+            assertEquals(mapOf(stable.getString("tag_name") to false, preview.getString("tag_name") to true,
+                legacy.getString("tag_name") to true), result.candidates.associate { it.tag to it.prerelease })
+            assertEquals(result.candidates, SystemVulkanComponentStore.cached(app, profile).candidates)
+
+            preview.put("prerelease", false)
+            val promoted = SystemVulkanComponentStore.refresh(app, profile)
+            assertEquals(false, promoted.candidates.single { it.tag == preview.getString("tag_name") }.prerelease)
+            GitHubArtifacts.openConnection = { throw IOException("offline") }
+            assertEquals(promoted.candidates, SystemVulkanComponentStore.refresh(app, profile).candidates)
+
+            val source = SystemVulkanComponentStore.initializeSources(app, profile).single()
+            val cache = File(RepositorySources.cacheDirectory(app, SystemVulkanComponentStore.scope(profile), source),
+                "system-vulkan-candidates.json")
+            val oldCache = JSONObject(cache.readText())
+            val candidates = oldCache.getJSONArray("candidates")
+            for (index in 0 until candidates.length()) candidates.getJSONObject(index).remove("prerelease")
+            cache.writeText(oldCache.toString())
+            assertEquals(promoted.candidates.map { it.copy(prerelease = null) },
+                SystemVulkanComponentStore.cached(app, profile).candidates)
+        } finally {
+            GitHubArtifacts.openConnection = transport
+        }
+    }
+
+    @Test fun installedReleaseChannelsPreserveUnknownOlderReceipts() {
+        listOf(true, false, null).forEachIndexed { index, channel ->
+            val directory = component((index + 1).toString().repeat(64), "v0.$index.0")
+            val receipt = File(directory, ".droiddeck-receipt.json")
+            receipt.writeText(JSONObject(receipt.readText()).put("prerelease", channel).toString())
+        }
+        assertEquals(mapOf("v0.0.0" to true, "v0.1.0" to false, "v0.2.0" to null),
+            SystemVulkanComponentStore.installed(app, profile).associate { it.version to it.prerelease })
     }
 
     @Test fun rateLimitedRefreshRetainsTheLastSuccessfulCheckTime() {
@@ -401,6 +487,7 @@ class SystemVulkanComponentStoreTest {
             "directory-fixture", profile.id, 26, "b".repeat(64), 1,
             "system-vulkan-${profile.id}.tar.zst", "https://example.invalid/component", archive.length(), digest,
             tree, commit, buildUrl,
+            prerelease = true,
         )
         val target = File(app.filesDir, "components/system-vulkan/$digest")
         target.parentFile!!.mkdirs()
@@ -417,6 +504,7 @@ class SystemVulkanComponentStoreTest {
         assertTrue(File(target, "lib").isDirectory)
         assertTrue(File(target, "lib/libhybris/linker/q.so").isFile)
         assertTrue(File(target, "READY").isFile)
+        assertEquals(true, SystemVulkanComponentStore.installed(app, profile).single().prerelease)
     }
 
     private fun component(hash: String, version: String, legacy: Boolean = false): File {

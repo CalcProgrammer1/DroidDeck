@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.Application
 import android.os.Handler
 import android.os.Looper
+import com.droiddeck.launcher.artifact.RepositorySources
 import com.droiddeck.launcher.gpu.GpuInfo
 import com.droiddeck.launcher.gpu.SystemVulkanComponentStore
 import com.droiddeck.launcher.gpu.SystemVulkanManifest
@@ -14,6 +15,8 @@ import com.droiddeck.launcher.session.SessionState
 import com.droiddeck.launcher.ui.DriverRow
 import com.droiddeck.launcher.ui.GPU_MODE_PAIR
 import java.io.File
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -46,6 +49,8 @@ class DriverMenusSystemTest {
         SessionState.phase = SessionPhase.IDLE
         File(activity.filesDir, "system_vulkan").deleteRecursively()
         File(activity.filesDir, "components/system-vulkan").deleteRecursively()
+        File(activity.filesDir, "repository-sources").deleteRecursively()
+        File(activity.cacheDir, "repository-metadata").deleteRecursively()
         activity.finish()
     }
 
@@ -152,6 +157,70 @@ class DriverMenusSystemTest {
             systemComponentTitle(activity, "Mali", "2026.10.18"))
         assertNull(systemComponentPublished(activity, "not-a-date"))
         assertTrue(systemComponentPublished(activity, "2026-10-18T09:48:00Z")!!.startsWith("Published "))
+    }
+
+    @Test fun systemRowsShowGithubChannelsAndKeepUnknownCachedBuildsUnlabelled() {
+        val profile = com.droiddeck.launcher.gpu.SystemVulkanDriver.Profile.MALI
+        val scope = SystemVulkanComponentStore.scope(profile)
+        val defaults = SystemVulkanComponentStore.sourceBuiltIns()
+        val initial = SystemVulkanComponentStore.initializeSources(activity, profile).single()
+        val source = RepositorySources.bind(activity, scope, defaults, initial, 12345L,
+            RepositorySources.generation(activity, scope, defaults))
+        val candidates = JSONArray()
+        listOf(true, false, null).forEachIndexed { index, channel ->
+            val hash = (index + 1).toString().repeat(64)
+            val tag = "system-vulkan-mali-v0.$index.0"
+            candidates.put(JSONObject().put("key", "${source.id}:$hash").put("sourceId", source.id)
+                .put("repository", source.repository).put("repositoryId", source.repositoryId)
+                .put("releaseId", index + 1).put("tag", tag).put("publishedAt", "2026-10-18T00:00:00Z")
+                .put("version", "v0.$index.0").put("variant", profile.id).put("minSdk", 26)
+                .put("manifestSha256", "8".repeat(64)).put("assetId", index + 10)
+                .put("assetName", "system-vulkan-mali.tar.zst")
+                .put("assetUrl", "https://github.com/${source.repository}/releases/download/$tag/system-vulkan-mali.tar.zst")
+                .put("size", 100).put("sha256", hash).put("treeSha256", "9".repeat(64))
+                .put("producerCommit", "a".repeat(40))
+                .put("buildUrl", "https://github.com/${source.repository}/actions/runs/1").put("prerelease", channel))
+        }
+        val cache = File(RepositorySources.cacheDirectory(activity, scope, source), "system-vulkan-candidates.json")
+        cache.parentFile!!.mkdirs()
+        val contents = JSONObject().put("schema", 1).put("sourceId", source.id)
+            .put("repository", source.repository).put("repositoryId", source.repositoryId).put("candidates", candidates)
+        cache.writeText(contents.toString())
+        val menus = DriverMenus(activity, Handler(Looper.getMainLooper()), gpu)
+        menus.refreshReleaseRows()
+
+        val rows = menus.state().systemDownloads.associateBy { it.key }
+        val preview = activity.getString(R.string.upd_preview)
+        val stable = activity.getString(R.string.upd_stable)
+        assertEquals(3, rows.size)
+        assertTrue(rows.getValue("${source.id}:${"1".repeat(64)}").detail.contains(preview))
+        assertTrue(rows.getValue("${source.id}:${"2".repeat(64)}").detail.contains(stable))
+        val old = rows.getValue("${source.id}:${"3".repeat(64)}").detail
+        assertFalse(old.contains(preview))
+        assertFalse(old.contains(stable))
+
+        val digest = "1".repeat(64)
+        val directory = File(activity.filesDir, "components/system-vulkan/$digest").apply { mkdirs() }
+        SystemVulkanManifest.required(profile.id).forEach { path ->
+            File(directory, path).apply { parentFile!!.mkdirs(); writeText("payload") }
+        }
+        File(directory, "run-proton.py").setExecutable(true)
+        File(directory, "icd.json").writeText("{}")
+        File(directory, "READY").writeText(digest)
+        File(directory, ".droiddeck-receipt.json").writeText(JSONObject()
+            .put("schema", 1).put("component", "system-vulkan").put("variant", profile.id)
+            .put("version", "v0.0.0").put("sha256", digest).put("repository", source.repository)
+            .put("tag", candidates.getJSONObject(0).getString("tag")).put("prerelease", true).toString())
+        menus.refreshDrivers()
+        assertTrue(menus.state().systemRows.single().detail.contains(preview))
+
+        candidates.getJSONObject(0).put("prerelease", false)
+        cache.writeText(contents.toString())
+        menus.refreshReleaseRows()
+        menus.refreshDrivers()
+        val promoted = menus.state().systemRows.single().detail
+        assertTrue(promoted.contains(stable))
+        assertFalse(promoted.contains(preview))
     }
 
     private fun legacy(digest: String) {
