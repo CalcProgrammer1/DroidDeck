@@ -27,6 +27,10 @@ on:
         type: choice
         options: [powervr, xclipse, mali]
         default: powervr
+      wallentx_preview:
+        description: Build the startup fix as an update to wallentx Preview 3
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -271,6 +275,30 @@ jobs:
           NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}}"
           VERSION=$(sed -n 's/^Pkg.Revision *= *//p' "$NDK/source.properties")
           echo "NDK_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Set the fork preview version
+        if: github.event_name == 'workflow_dispatch' && inputs.wallentx_preview
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != wallentx/DroidDeck || "$GITHUB_REF" != refs/heads/wallentx/powervr ]]; then
+            echo "::error::the preview update is only supported on wallentx/DroidDeck's wallentx/powervr branch"
+            exit 1
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('app/build.gradle')
+          source = path.read_text()
+          for old, new in (
+              (r'(?m)^        versionCode 14$', '        versionCode 16'),
+              (r'(?m)^        versionName "0\.5\.0"$', '        versionName "0.5.0-wallentx.3-startupfix"'),
+          ):
+              source, count = re.subn(old, new, source)
+              if count != 1:
+                  raise SystemExit('Unexpected base version; review the preview update version')
+          path.write_text(source)
+          PY
 
       - name: Set the APK build label
         id: build-label
