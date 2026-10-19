@@ -183,6 +183,9 @@ internal class DriverMenus(
                 systemComponentTitle(activity, systemDriverName, component.version.takeUnless { component.legacy }),
                 listOfNotNull(
                     if (component.legacy) activity.getString(R.string.gpu_system_legacy_detail) else component.repository,
+                    systemComponentChannel(activity, systemCatalog.candidates.firstOrNull {
+                        it.sha256 == component.sha256 && it.repository == component.repository && it.tag == component.tag
+                    }?.prerelease ?: component.prerelease),
                     protection?.let(activity::getString),
                 ).joinToString(" · "),
                 removable,
@@ -646,7 +649,8 @@ internal class DriverMenus(
                 com.droiddeck.launcher.ui.DownloadRow(
                     candidate.key,
                     systemComponentTitle(activity, systemDriverName, candidate.version),
-                    listOfNotNull(candidate.repository, systemComponentPublished(activity, candidate.publishedAt), mb).joinToString(" · "),
+                    listOfNotNull(candidate.repository, systemComponentChannel(activity, candidate.prerelease),
+                        systemComponentPublished(activity, candidate.publishedAt), mb).joinToString(" · "),
                     releaseProgress[candidate.key],
                 )
             }
@@ -857,6 +861,10 @@ internal fun systemComponentVersion(context: Context, version: String): String =
 internal fun systemComponentTitle(context: Context, profile: String, version: String?): String =
     context.getString(R.string.gpu_system_runtime_title, profile) +
         (version?.let { " · ${systemComponentVersion(context, it)}" } ?: "")
+
+internal fun systemComponentChannel(context: Context, prerelease: Boolean?): String? = prerelease?.let {
+    context.getString(if (it) R.string.upd_preview else R.string.upd_stable)
+}
 
 internal fun systemComponentPublished(context: Context, publishedAt: String): String? = runCatching {
     val date = java.util.Date.from(java.time.Instant.parse(publishedAt))

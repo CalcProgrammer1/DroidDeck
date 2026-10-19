@@ -54,6 +54,7 @@ object SystemVulkanComponentStore {
         val treeSha256: String,
         val producerCommit: String,
         val buildUrl: String,
+        val prerelease: Boolean? = null,
     )
 
     data class Catalog(
@@ -75,6 +76,7 @@ object SystemVulkanComponentStore {
         val active: Boolean,
         val previous: Boolean,
         val pending: Boolean,
+        val prerelease: Boolean? = null,
     )
 
     data class Snapshot(
@@ -491,6 +493,7 @@ object SystemVulkanComponentStore {
             sidecarAsset.sha256,
             archive.id, archive.name, archive.url, archive.size, archive.sha256,
             sidecar.artifact.treeSha256, sidecar.provenance.commit, sidecar.provenance.buildUrl,
+            prerelease = release.prerelease,
         )
     }
 
@@ -577,6 +580,7 @@ object SystemVulkanComponentStore {
             .put("sourceId", source.id).put("repository", source.repository)
             .put("repositoryId", source.repositoryId).put("releaseId", candidate.releaseId)
             .put("tag", candidate.tag).put("assetId", candidate.assetId)
+            .put("prerelease", candidate.prerelease)
             .put("producerCommit", candidate.producerCommit).put("buildUrl", candidate.buildUrl)
         RepositorySources.atomicWrite(File(stage, RECEIPT), json.toString().toByteArray(Charsets.UTF_8))
     }
@@ -614,6 +618,7 @@ object SystemVulkanComponentStore {
         .put("assetId", row.assetId).put("assetName", row.assetName).put("assetUrl", row.assetUrl)
         .put("size", row.size).put("sha256", row.sha256).put("treeSha256", row.treeSha256)
         .put("producerCommit", row.producerCommit).put("buildUrl", row.buildUrl)
+        .put("prerelease", row.prerelease)
 
     private fun decodeCandidate(json: JSONObject): Candidate = Candidate(
         json.getString("key"), json.getString("sourceId"), json.getString("repository"), json.getLong("repositoryId"),
@@ -622,6 +627,7 @@ object SystemVulkanComponentStore {
         json.getLong("assetId"), json.getString("assetName"), json.getString("assetUrl"),
         json.getLong("size"), json.getString("sha256"), json.getString("treeSha256"),
         json.getString("producerCommit"), json.getString("buildUrl"),
+        prerelease = json.opt("prerelease") as? Boolean,
     ).also {
         require(it.key == "${it.sourceId}:${it.sha256}" && HASH.matches(it.sha256) && HASH.matches(it.treeSha256) &&
             HASH.matches(it.manifestSha256) && it.minSdk in 26..100)
@@ -682,6 +688,7 @@ object SystemVulkanComponentStore {
         rowId(directory.name), directory.name, receipt.getString("variant"), receipt.getString("version"),
         receipt.optString("repository").takeIf { it.isNotEmpty() }, receipt.optString("tag").takeIf { it.isNotEmpty() },
         directory, legacy, state.active == directory.name, state.previous == directory.name, state.pending == directory.name,
+        prerelease = receipt.opt("prerelease") as? Boolean,
     )
 
     private fun receipt(directory: File, profile: SystemVulkanDriver.Profile): JSONObject? = runCatching {

@@ -215,8 +215,9 @@ def main():
     parser.add_argument("--repository-id", type=int, required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--build-url", required=True)
-    parser.add_argument("--release-tag", required=True)
+    parser.add_argument("--variant", choices=VARIANTS, required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--bootstrap", type=Path, help="Existing bootstrap pins to preserve for this producer")
     parser.add_argument("--cache-dir", type=Path, default=Path(os.environ.get(
         "DROIDDECK_BUILD_CACHE", str(Path.home() / ".cache/droiddeck-build"))))
     args = parser.parse_args()
@@ -226,16 +227,38 @@ def main():
         parser.error("commit must be a full Git object ID")
     if not args.build_url.startswith("https://github.com/"):
         parser.error("build URL must be a GitHub HTTPS URL")
-    args.output.mkdir(parents=True, exist_ok=True)
+    if len(args.version) > 80 or not re.fullmatch(
+        r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?",
+        args.version,
+    ):
+        parser.error("version must be vMAJOR.MINOR.PATCH, optionally followed by a prerelease suffix")
+    if args.output.exists() and (not args.output.is_dir() or any(args.output.iterdir())):
+        parser.error("output directory must be empty; do not mix vendor releases or overwrite packaged assets")
     pins = {
         "schema": 1,
         "repository": args.repository.lower(),
         "repositoryId": args.repository_id,
         "profiles": {},
     }
-    for variant in VARIANTS:
-        _, digest = build_variant(args, variant)
-        pins["profiles"][variant] = {"tag": args.release_tag, "manifestSha256": digest}
+    bootstrap = args.bootstrap or ROOT / "tools/powervr/component-bootstrap.json"
+    if args.bootstrap is not None or bootstrap.exists():
+        existing = json.loads(bootstrap.read_text())
+        if existing.get("schema") != 1 or not isinstance(existing.get("profiles"), dict):
+            parser.error("unsupported bootstrap pins")
+        if existing.get("repository", "").lower() == args.repository.lower():
+            if existing.get("repositoryId") != args.repository_id:
+                parser.error("bootstrap producer repository identity changed")
+            for variant, pin in existing["profiles"].items():
+                if (variant not in VARIANTS or not isinstance(pin, dict)
+                        or not re.fullmatch(r"[A-Za-z0-9._/-]+", pin.get("tag", ""))
+                        or not re.fullmatch(r"[0-9a-f]{64}", pin.get("manifestSha256", ""))):
+                    parser.error("invalid existing bootstrap profile pin")
+            pins["profiles"] = existing["profiles"]
+    args.output.mkdir(parents=True, exist_ok=True)
+    _, digest = build_variant(args, args.variant)
+    pins["profiles"][args.variant] = {
+        "tag": f"system-vulkan-{args.variant}-{args.version}", "manifestSha256": digest,
+    }
     (args.output / "component-bootstrap.json").write_bytes(json_bytes(pins))
     print(json.dumps(pins, indent=2, sort_keys=True))
 

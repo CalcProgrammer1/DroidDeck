@@ -134,7 +134,15 @@ links from the pinned build inputs. The installer rejects links, duplicate or
 unlisted entries, unsafe paths, unsupported requirements, and oversized payloads.
 Only a completely verified staging directory becomes an installed bundle.
 
-Use the pinned native inputs to produce all three variants:
+Each GPU family has its own immutable release tag and version:
+
+| GPU family | Tag pattern |
+| --- | --- |
+| PowerVR | `system-vulkan-powervr-vMAJOR.MINOR.PATCH` |
+| Xclipse | `system-vulkan-xclipse-vMAJOR.MINOR.PATCH` |
+| Mali | `system-vulkan-mali-vMAJOR.MINOR.PATCH` |
+
+Use the pinned native inputs to produce one variant:
 
 ```sh
 python3 tools/powervr/package_components.py \
@@ -143,16 +151,33 @@ python3 tools/powervr/package_components.py \
   --repository-id 123456 \
   --commit <full-source-commit> \
   --build-url https://github.com/owner/repository/actions/runs/123456 \
-  --release-tag system-vulkan-v1 \
-  --version v1
+  --variant mali \
+  --version v0.1.0
 ```
 
-Publish the three archives and their sidecars together. The generated
-`component-bootstrap.json` records each sidecar digest and tag. After verifying
-the published assets, place that file at `tools/powervr/component-bootstrap.json`
-before building the app. Automatic first installation accepts only these exact
+The packager derives `system-vulkan-mali-v0.1.0` from these arguments and requires
+an empty output directory. Publish that variant's archive and sidecar together.
+The generated `component-bootstrap.json` updates only that profile, preserving
+the other profiles from `tools/powervr/component-bootstrap.json` when the producer
+repository and numeric ID match. Use `--bootstrap <path>` to supply newer pins;
+pins belonging to a different producer are not carried across repositories.
+After verifying the published assets, adopt the generated pins before building
+the app. If another profile was updated after packaging, regenerate the candidate
+from the latest pins before adopting it. Automatic first installation accepts only these exact
 pins and the declared numeric repository ID. Missing pins disable automatic
 download; they do not select an unpinned release or another repository.
+
+The publisher's `prerelease` input uses GitHub's existing release flag and defaults
+to `true`; set it to `false` for a stable release. Optional version suffixes such as
+`v0.2.0-rc.1` are accepted, but the GitHub flag determines the channel. The component
+list includes both channels and uses the existing **Stable** and **Preview** labels.
+Cached candidates and installed receipts retain that flag. Older entries without
+channel metadata stay unlabeled until current metadata is available.
+
+Existing shared-tag releases remain discoverable through their exact profile
+sidecars. Tag names do not replace manifest, repository, or checksum validation.
+Auto still installs the APK's pinned recommendation only when a component is
+missing; a newer stable or preview entry does not replace a working installation.
 
 `-PcomponentRepository=owner/repository` selects the build's pinned GPU producer.
 PR builds set `DROIDDECK_COMPONENT_REPOSITORY` to the PR's head repository. Other

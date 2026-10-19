@@ -12,15 +12,18 @@ The build-declared `COMPONENT_REPOSITORY` is the only automatic bootstrap produc
 
 ## Release assets
 
-Each release publishes these pairs:
+Each release publishes one vendor's pair under its own immutable tag:
 
 ```text
-droiddeck-component-system-vulkan-powervr.json
-system-vulkan-powervr.tar.zst
-droiddeck-component-system-vulkan-xclipse.json
-system-vulkan-xclipse.tar.zst
-droiddeck-component-system-vulkan-mali.json
-system-vulkan-mali.tar.zst
+system-vulkan-powervr-v0.1.0
+  droiddeck-component-system-vulkan-powervr.json
+  system-vulkan-powervr.tar.zst
+system-vulkan-xclipse-v0.1.0
+  droiddeck-component-system-vulkan-xclipse.json
+  system-vulkan-xclipse.tar.zst
+system-vulkan-mali-v0.1.0
+  droiddeck-component-system-vulkan-mali.json
+  system-vulkan-mali.tar.zst
 ```
 
 The sidecar schema is `1`, `component` is `system-vulkan`, and `variant` is one of the three scope suffixes. `requires` fixes `componentApi: 1`, `abi: arm64-v8a`, and the minimum Android SDK. `artifact` binds the archive name, byte size, SHA-256, and normalized tree SHA-256. `provenance` binds the producing repository, full commit, and GitHub Actions run URL.
@@ -38,12 +41,37 @@ python3 tools/powervr/package_components.py \
   --repository-id 1406436811 \
   --commit "$(git rev-parse HEAD)" \
   --build-url https://github.com/wallentx/DroidDeck/actions/runs/RUN_ID \
-  --release-tag system-vulkan-VERSION \
-  --version VERSION
+  --variant mali \
+  --version v0.1.0
 ```
 
-`Publish System Vulkan components` runs the tests, packages all three variants, records checksums, and can create a new immutable GitHub release. It refuses to overwrite an existing tag and explicitly targets the same commit recorded in each sidecar and checked out by the workflow.
+The output directory must be empty. The tag is derived from `--variant` and
+`--version`; a Mali change does not assign new versions to PowerVR or Xclipse.
+Versions use `vMAJOR.MINOR.PATCH`, optionally with a prerelease suffix such as
+`-rc.1`. The APK version and the native input versions remain independent.
 
-The packager also emits `component-bootstrap.json`. After the release is published and its assets are verified, replace `tools/powervr/component-bootstrap.json` with that generated file and rebuild the APK. The signed APK then pins the producer's numeric GitHub repository ID, release tag, and sidecar SHA-256 for each GPU family. Empty or mismatched pins disable automatic bootstrap and never fall back to another fork; manual source selection remains available.
+`Publish System Vulkan components` runs the tests, packages the selected `variant`,
+records checksums, and can create a new immutable GitHub release. Its `prerelease`
+input defaults to `true`; select `false` for a stable release. This uses GitHub's
+release flag, which the app already parses, rather than inferring a channel from
+the tag. Both channels are listed, using the existing Stable and Preview labels.
+The workflow refuses to overwrite an existing release or tag and targets the
+same commit recorded in the sidecar. A component release never becomes the
+repository's latest app release.
+
+The packager also emits `component-bootstrap.json`, preserving other profiles
+from the checked-in pins when the producer repository and numeric ID match.
+`--bootstrap <path>` can supply a different base file. A new producer starts its
+own pin set; it cannot inherit another repository's tags. The source pin file is
+never modified by packaging. After verifying the published assets, adopt the
+candidate pins and rebuild the APK. Regenerate against current pins if another
+profile changed in the meantime. The signed APK then pins each profile's exact
+tag and sidecar hash. Empty or mismatched pins disable automatic bootstrap;
+manual source selection remains available.
+
+Old shared-tag releases remain compatible through their profile sidecars. Older
+cached or installed builds with no recorded GitHub channel remain unlabeled;
+their channel is not guessed from their version. Auto continues to use the APK's
+explicit recommendation when needed, rather than updating to the newest preview.
 
 Existing complete directories under `files/system_vulkan/<sha256>` are accepted offline as `Legacy local`. They retain no invented repository or release provenance. New downloads are staged and validated before atomic publication under `files/components/system-vulkan/<sha256>`.
