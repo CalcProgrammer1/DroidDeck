@@ -88,7 +88,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val ui = Handler(Looper.getMainLooper())
-    private val drivers = DriverMenus(this, ui)
+    private val drivers by lazy { DriverMenus(this, ui) }
     private val components = ComponentsMenu(this, ui)
     private val decky = DeckyMenu(this, ui)
     private val updates = UpdatesMenu(this, ui)
