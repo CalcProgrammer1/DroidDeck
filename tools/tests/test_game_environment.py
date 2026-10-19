@@ -524,6 +524,11 @@ class PlacedMemoryLaunchTest(unittest.TestCase):
                      "DROIDDECK_SYSTEM_VULKAN_GPU": gpu,
                      "STEAM_COMPAT_DATA_PATH": "/compatdata/42"}, **extra)
 
+    def mali_profile(self, root):
+        runtime, _ = self.runtime(root, "dxvk-mali", ("i386-windows", "x86_64-windows", "aarch64-windows"))
+        return runtime, self.environment(runtime, "mali", DROIDDECK_SYSTEM_VULKAN_DXVK="managed",
+                                         DROIDDECK_HYBRIS_DXVK="dxvk-mali", DXVK_MALI_COMPAT="1")
+
     def launch(self, exe, env, proton="/selected/proton", verb="waitforexitandrun"):
         return MODULE["system_graphics_launch"]([proton, verb, str(exe)], env)
 
@@ -558,7 +563,7 @@ class PlacedMemoryLaunchTest(unittest.TestCase):
                     self.assertNotIn(self.layer, actual["VK_INSTANCE_LAYERS"])
                     self.assertEqual(actual[self.setting], setting)
 
-    def test_mali_and_other_system_profiles_require_explicit_opt_in(self):
+    def test_legacy_mali_and_other_system_profiles_require_explicit_opt_in(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime, _ = self.runtime(root)
@@ -571,6 +576,95 @@ class PlacedMemoryLaunchTest(unittest.TestCase):
                     self.assertNotIn(self.layer, default["VK_INSTANCE_LAYERS"])
                     _, requested = self.launch(exe, dict(env, **{self.setting: "1"}))
                     self.assertTrue(requested["VK_INSTANCE_LAYERS"].endswith(":" + self.layer))
+
+    def test_managed_mali_i386_activates_without_a_game_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime, env = self.mali_profile(root)
+            self.components(runtime)
+            exe = self.executable(root, name="hl2.exe")
+            env.update(VK_ICD_FILENAMES=str(runtime / "icd.json"),
+                       VK_INSTANCE_LAYERS="VK_LAYER_HYBRIS_compat")
+            saved = dict(env)
+            command, actual = self.launch(exe, env)
+            self.assertEqual(command, [str(runtime / "run-proton.py"), "/selected/proton",
+                                       "waitforexitandrun", str(exe)])
+            self.assertEqual(actual[self.setting], "1")
+            self.assertEqual(actual["VK_INSTANCE_LAYERS"],
+                             "VK_LAYER_window_system_integration:VK_LAYER_HYBRIS_compat:" + self.layer)
+            self.assertEqual(env, saved)
+
+    def test_mali_default_requires_the_managed_experimental_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime, env = self.mali_profile(root)
+            self.runtime(root)
+            exe = self.executable(root)
+            variants = {"DROIDDECK_SYSTEM_VULKAN_GPU": (None, "", "xclipse", "future-vendor"),
+                        "DROIDDECK_SYSTEM_VULKAN_DXVK": (None, "", "user"),
+                        "DROIDDECK_HYBRIS_DXVK": (None, "", "dxvk"),
+                        "DXVK_MALI_COMPAT": (None, "", "0")}
+            for key, values in variants.items():
+                for value in values:
+                    with self.subTest(key=key, value=value):
+                        selected = dict(env)
+                        if value is None:
+                            selected.pop(key)
+                        else:
+                            selected[key] = value
+                        _, actual = self.launch(exe, selected)
+                        self.assertNotIn(self.layer, actual["VK_INSTANCE_LAYERS"])
+            for setting in ("0", "", "invalid"):
+                with self.subTest(setting=setting):
+                    _, actual = self.launch(exe, dict(env, **{self.setting: setting}))
+                    self.assertNotIn(self.layer, actual["VK_INSTANCE_LAYERS"])
+                    self.assertEqual(actual[self.setting], setting)
+
+    def test_managed_mali_default_keeps_game_architecture_and_driver_guards(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime, env = self.mali_profile(root)
+            exe = self.executable(root)
+            for selection in ({"VK_ICD_FILENAMES": "/manual/icd.json"},
+                              {"VK_DRIVER_FILES": "/manual/icd.json",
+                               "VK_ICD_FILENAMES": str(runtime / "icd.json")},
+                              {"VK_ADD_DRIVER_FILES": "/manual/icd.json"},
+                              {"VK_ICD_FILENAMES": str(runtime / "icd.json") + ":/manual/icd.json"},
+                              {"STEAM_COMPAT_DATA_PATH": "/compatdata/0"}):
+                with self.subTest(selection=selection):
+                    _, actual = self.launch(exe, dict(env, **selection))
+                    self.assertNotIn(self.layer, actual.get("VK_INSTANCE_LAYERS", ""))
+            for machine in (0x8664, 0xaa64, 0xa641, 0xa64e):
+                with self.subTest(machine=hex(machine)):
+                    _, actual = self.launch(self.executable(root, machine, 0x20b), env)
+                    self.assertNotIn(self.layer, actual["VK_INSTANCE_LAYERS"])
+            for name in ("steam.exe", "steamwebhelper.exe", "iscriptevaluator.exe"):
+                with self.subTest(name=name):
+                    _, actual = self.launch(self.executable(root, name=name), env)
+                    self.assertNotIn(self.layer, actual["VK_INSTANCE_LAYERS"])
+            native = root / "native-game"
+            native.write_bytes(b"\x7fELF" + b"\0" * 600)
+            _, actual = self.launch(native, env)
+            self.assertNotIn(self.layer, actual["VK_INSTANCE_LAYERS"])
+            command = [str(native), "--fullscreen"]
+            self.assertEqual(MODULE["system_graphics_launch"](command, env), (command, env))
+            for proton, verb in (("/selected/not-proton", "waitforexitandrun"),
+                                 ("/selected/proton", "run"), ("/selected/proton", "getcompatpath")):
+                with self.subTest(proton=proton, verb=verb):
+                    _, actual = self.launch(self.executable(root), env, proton, verb)
+                    self.assertNotIn(self.layer, actual.get("VK_INSTANCE_LAYERS", ""))
+
+    def test_managed_mali_default_requires_the_bundled_placed_memory_components(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime, env = self.mali_profile(root)
+            exe = self.executable(root)
+            for name in (self.library, self.manifest):
+                self.components(runtime)
+                (runtime / "lib" / name).unlink()
+                with self.subTest(missing=name), self.assertRaisesRegex(MODULE["SystemGraphicsError"], name):
+                    self.launch(exe, env)
+                self.launch(exe, dict(env, **{self.setting: "0"}))
 
     def test_x64_arm64_and_arm64ec_never_activate_even_when_requested(self):
         with tempfile.TemporaryDirectory() as tmp:

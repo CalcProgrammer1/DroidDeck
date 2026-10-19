@@ -12,7 +12,7 @@ DroidDeck's `android_wlegl` / Android hardware buffer receiver.
 | Inner X11 presentation | Existing DRI3/Steam GL profile | Existing DRI3/Steam GL profile | Bundled X11 WSI with `WSI_X11_FORCE_SHM=1` |
 | Steam UI rendering | Software CEF; game graphics remain hardware accelerated | Existing GPU CEF path | Existing GPU CEF path |
 | Proton DXVK | Managed patched `dxvk` | Managed patched `dxvk-2.6.2` for 128-byte push constants | Managed experimental `dxvk-mali`, guarded to Mali-G715 driver 54.3.0 |
-| Session / game compatibility layers | compat / WSI + compat (+ placed for i386) | compat / WSI + compat | compat / WSI + compat |
+| Session / game compatibility layers | compat / WSI + compat (+ placed for i386) | compat / WSI + compat | compat / WSI + compat (+ placed for managed experimental i386) |
 | Session / managed-game BC emulation | Existing policy / `dxvk` | `0` / `dxvk` | Existing policy / `dxvk` |
 
 X11 layer settings are applied after the outer Gamescope launch, including direct
@@ -28,13 +28,13 @@ with a managed DXVK payload, or native presentation with a user-selected payload
 | Environment key | Meaning |
 | --- | --- |
 | `DROIDDECK_SYSTEM_VULKAN_RUNTIME` | Selected bridge directory; takes precedence over the legacy alias |
-| `DROIDDECK_SYSTEM_VULKAN_GPU` | Vendor profile identity; selects compatibility defaults, including PowerVR's 32-bit placed-memory path |
+| `DROIDDECK_SYSTEM_VULKAN_GPU` | Vendor profile identity; selects compatibility defaults, including PowerVR and managed experimental Mali 32-bit placed-memory paths |
 | `DROIDDECK_SYSTEM_VULKAN_PRESENTATION` | `native` preserves normal presentation; `x11-shm` enables the X11 client fallback |
 | `DROIDDECK_SYSTEM_VULKAN_DXVK` | `managed` uses the runtime wrapper/payload; `user` preserves Proton/DXVK/WineD3D choices |
 | `DROIDDECK_HYBRIS_SESSION_LAYERS` | Outer/session layer list, restored before launching a nested Gamescope |
 | `DROIDDECK_HYBRIS_SESSION_BC_TEXTURES` | Optional outer/session BC policy, restored before nested compositors; Xclipse sets `0` |
 | `BL_STEAM_CEF_SOFTWARE` | `1` selects `-cef-disable-gpu` for Steam's UI; selected by the PowerVR profile only |
-| `DROIDDECK_EXPERIMENTAL_PLACED_MEMORY` | `1` enables the bundled low-address memory layer for confirmed 32-bit Windows games; `0` disables the PowerVR default |
+| `DROIDDECK_EXPERIMENTAL_PLACED_MEMORY` | `1` enables the bundled low-address memory layer for confirmed 32-bit Windows games; `0` disables the PowerVR or managed experimental Mali default |
 
 `DROIDDECK_HYBRIS_LAYERS` separately specifies game compatibility layers;
 `DROIDDECK_HYBRIS_LAYER_PATH` adds their directory, and `DROIDDECK_HYBRIS_DXVK`
@@ -112,12 +112,15 @@ PowerVR driver, native mappings land above that range; Wine unmaps them and retu
 exported `OPAQUE_FD` memory and a shared mapping at Wine's reserved address.
 
 `droiddeck-game-env` enables this layer by default for PowerVR system-driver
-launches only after checking that the actual executable is PE32/i386. The layer
+launches and the managed experimental Mali profile (`mali`, `managed`,
+`dxvk-mali`, and `DXVK_MALI_COMPAT=1`), only after checking that the actual
+executable is PE32/i386. Mali Auto therefore needs no per-game override. The layer
 runs below `VK_LAYER_HYBRIS_compat`, so resources created by BC translation follow
 the same export policy. Steam, native Linux programs and 64-bit Windows programs
 retain their existing layer lists. Explicit driver overrides bypass automatic
 activation. Set `DROIDDECK_EXPERIMENTAL_PLACED_MEMORY=0` to disable it, or `1` to
-test another system-driver profile such as Mali.
+test another system-driver profile. Legacy or user-managed Mali configurations
+still require that explicit opt-in; invalid values disable automatic activation.
 
 The layer keeps the native driver mapping for flush/invalidate operations and
 preserves Wine's reserved address on unmap. Buffers and images use matching
@@ -140,8 +143,9 @@ do not expose this backend. The lock serializes placement with Android driver
 `mmap`, `mmap64`, and `munmap` hooks, including driver worker threads, and survives
 fork. Guards occupy only free address ranges and never replace unrelated mappings.
 Target validation runs again under the lock before releasing Wine's reservation.
-This remains an explicit experiment for the tested G715/hybris stack: arbitrary
-raw syscalls, other mapping implementations, and other Mali generations have not
+Automatic selection on Mali remains limited to its managed experimental profile;
+the runtime backend still validates mapping support. Arbitrary raw syscalls,
+other mapping implementations, and other Mali generations have not
 been validated. Source changes require rebuilding and repinning the libhybris
 component before they are included in an APK.
 

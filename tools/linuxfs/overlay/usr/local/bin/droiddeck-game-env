@@ -386,7 +386,10 @@ def system_icd_selected(directory, env):
 
 def placed_memory_requested(command, directory, env):
     setting = env.get(PLACED_MEMORY_SETTING)
-    if setting not in (None, "1") or (setting != "1" and env.get("DROIDDECK_SYSTEM_VULKAN_GPU") != "powervr"):
+    gpu = env.get("DROIDDECK_SYSTEM_VULKAN_GPU")
+    managed_mali = (gpu == "mali" and env.get("DROIDDECK_SYSTEM_VULKAN_DXVK") == "managed" and
+                    env.get("DROIDDECK_HYBRIS_DXVK") == "dxvk-mali" and env.get("DXVK_MALI_COMPAT") == "1")
+    if setting not in (None, "1") or (setting != "1" and gpu != "powervr" and not managed_mali):
         return False
     if Path(command[2]).name.lower() in ("steam.exe", "steamwebhelper.exe", "iscriptevaluator.exe"):
         return False

@@ -589,7 +589,8 @@ class SessionService : Service() {
         guest.add("LIBGL_KOPPER_DRI2=true")
         LinuxRuntime.vulkanIcd(this)?.let { guest.add("VK_ICD_FILENAMES=" + it.path) }
         val linuxDriverId = SessionPrefs.linuxDriver(this)
-        if (SystemVulkanDriver.usesDefault(linuxDriverId)) {
+        val systemVulkan = SystemVulkanDriver.usesDefault(linuxDriverId)
+        if (systemVulkan) {
             val snapshot = systemVulkanSnapshot
                 ?: throw IllegalStateException("System Vulkan session snapshot is unavailable")
             SystemVulkanDriver.addEnvironment(snapshot, guest)
@@ -602,7 +603,7 @@ class SessionService : Service() {
                 ?: SessionPrefs.androidDriver(this),
             linuxDriverId,
         )
-        (if (SystemVulkanDriver.usesDefault(linuxDriverId)) {
+        (if (systemVulkan) {
             SystemVulkanDriver.icdPath(
                 systemVulkanSnapshot ?: throw IllegalStateException("System Vulkan session snapshot is unavailable"),
             )
@@ -617,7 +618,7 @@ class SessionService : Service() {
         if (SessionPrefs.glThread(this)) guest.add("mesa_glthread=true")
         if (SessionPrefs.noGlError(this)) guest.add("MESA_NO_ERROR=1")
         guest.add("MESA_DISK_CACHE_DATABASE=1")
-        guest.add("GLIBC_TUNABLES=glibc.pthread.rseq=0:glibc.malloc.top_pad=16777216")
+        guest.add("GLIBC_TUNABLES=" + sessionGlibcTunables(systemVulkan))
         if (SessionState.mode == MODE_STEAM) guest.add("BL_MANGOAPP=" + (if (SessionPrefs.mangoapp(this)) "1" else "0"))
         SessionState.steamClientArch = if (steamHere) SessionPrefs.steamClientArch(this) else null
         SessionState.steamClientArch?.let { arch ->
