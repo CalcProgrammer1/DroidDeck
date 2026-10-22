@@ -31,6 +31,8 @@ import java.io.IOException
 object ComponentsManager {
     private const val TAG = "Components"
     private const val NIGHTLIES = "the412banner/nightlies"
+    private const val DD_COMPONENTS = "droid-deck/droiddeck-components"
+    internal const val DD_NIGHTLY = "linux-nightly"
     private val RELEASES = linkedMapOf(
         "FexCore-Linux" to "fex",
         "Dxvk-Linux" to "dxvk",
@@ -38,6 +40,10 @@ object ComponentsManager {
         "Dxvk-gplasync-Linux" to "dxvk",
         "Vkd3d-proton-Linux" to "vkd3d",
     )
+    // DD_NIGHTLY holds every component in one release; the file name says which.
+    private val NIGHTLY_PREFIXES = linkedMapOf("DD-dxvk-" to "dxvk", "DD-vkd3d-proton-" to "vkd3d", "DD-FEXCore-" to "fex")
+    private val SOURCES = RELEASES.keys.map { NIGHTLIES to it } + (DD_COMPONENTS to DD_NIGHTLY)
+    private val DOWNLOAD_REPOS = listOf(NIGHTLIES, DD_COMPONENTS)
     private val TYPES = mapOf("FEXCore-Linux" to "fex", "DXVK-Linux" to "dxvk", "VKD3D-Linux" to "vkd3d")
     private val TYPE_OF = mapOf("fex" to "FEXCore-Linux", "dxvk" to "DXVK-Linux", "vkd3d" to "VKD3D-Linux")
     val COMPONENTS = listOf("fex", "dxvk", "vkd3d")
@@ -113,7 +119,7 @@ object ComponentsManager {
 
     @JvmStatic fun sourceBuiltIns(comp: String): List<String> {
         require(comp in COMPONENTS) { "Unknown component source scope" }
-        return listOf(NIGHTLIES)
+        return listOf(NIGHTLIES, DD_COMPONENTS)
     }
 
     @JvmStatic fun sources(context: Context, comp: String): List<RepositorySources.Source> =
@@ -759,6 +765,7 @@ object ComponentsManager {
         return PreparedLaunchState(lines.toString(), keep)
     }
 
+
     internal fun runtimeManaged(comp: String, runtimeManagedDxvk: Boolean): Boolean = comp == "dxvk" && runtimeManagedDxvk
 
     private fun runtimeManaged(context: Context, comp: String): Boolean =
@@ -1004,7 +1011,7 @@ object ComponentsManager {
             }
         }
         return Catalog(
-            items.distinctBy { it.id }.sortedWith(compareBy<CatalogItem> { it.comp }.then(newestFirst { it.file })),
+            items.distinctBy { it.id }.sortedWith(CATALOG_ORDER),
             fetchedAt,
             failed,
             rateLimited,
@@ -1141,6 +1148,11 @@ object ComponentsManager {
                 }
                 continue
             }
+            if (release.tag == DD_NIGHTLY) {
+                release.assets.filter { it.name.endsWith(".wcp", ignoreCase = true) && assetComp(release.tag, it.name) == comp }
+                    .forEach { asset -> items.add(catalogItem(comp, source, release, asset)) }
+                continue
+            }
             val sidecars = release.assets.filter {
                 it.name == "droiddeck-component.json" || it.name == "droiddeck-component-$comp.json"
             }
@@ -1199,8 +1211,29 @@ object ComponentsManager {
         require(arr.length() <= 2000) { "Component catalog has too many items" }
         val items = (0 until arr.length()).map { arr.getJSONObject(it) }.map {
             CatalogItem(it.optString("file"), it.optString("comp"), it.optString("release"), it.optString("url"), it.optLong("size"), it.optString("digest"))
-        }.sortedWith(compareBy<CatalogItem> { it.comp }.then(newestFirst { it.file }))
+        }.sortedWith(CATALOG_ORDER)
         return Catalog(items, o.optLong("fetchedAt"))
+    }
+
+    internal fun assetComp(release: String, name: String): String? =
+        RELEASES[release] ?: if (release == DD_NIGHTLY) NIGHTLY_PREFIXES.entries.firstOrNull { name.startsWith(it.key) }?.value else null
+
+    internal val CATALOG_ORDER: Comparator<CatalogItem> =
+        compareBy<CatalogItem> { it.comp }.thenBy { it.release == DD_NIGHTLY }.then(newestFirst { it.file })
+
+    internal fun nightlyPairs(items: List<CatalogItem>): Map<CatalogItem, CatalogItem> {
+        val stable = items.filter { it.release != DD_NIGHTLY }
+        return items.filter { it.release == DD_NIGHTLY }.mapNotNull { n ->
+            val base = n.file.removePrefix("DD-").removeSuffix("-nightly.wcp").substringBefore('+')
+            val rev = Regex(Regex.escape(base) + "(-\\d+)?-linux\\.wcp")
+            stable.filter { it.comp == n.comp && rev.matches(it.file) }
+                .maxWithOrNull { a, b -> ProtonExtras.compareVersions(a.file, b.file) }?.let { it to n }
+        }.groupBy({ it.first }, { it.second })
+            .mapValues { (_, ns) -> ns.maxWith { a, b -> ProtonExtras.compareVersions(a.file, b.file) } }
+    }
+
+    internal fun allowedDownload(url: String) = DOWNLOAD_REPOS.any {
+        url.startsWith("https://github.com/$it/releases/download/", ignoreCase = true)
     }
 
     private fun resolveLegacyLocalFile(context: Context, item: CatalogItem): CatalogItem {
@@ -1351,6 +1384,7 @@ object ComponentsManager {
         require(releaseUrlMatches(repository, item.release, item.file, item.url)) {
             context.getString(R.string.cmgr_nightlies_only)
         }
+        require(allowedDownload(item.url)) { context.getString(R.string.cmgr_nightlies_only) }
         require(Hashes.isGithubSha256(item.digest)) { context.getString(R.string.cmgr_list_predates_checksums) }
         require(item.size in 1..(2L * 1024 * 1024 * 1024)) { "Component archive has an invalid size" }
         val dest = File(packagesDir(context), safeName(item.localFile))

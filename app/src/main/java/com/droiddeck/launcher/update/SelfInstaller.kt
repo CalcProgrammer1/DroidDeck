@@ -73,7 +73,8 @@ object SelfInstaller {
         }
         @Suppress("DEPRECATION")
         val flags = if (Build.VERSION.SDK_INT >= 28) {
-            PackageManager.GET_SIGNING_CERTIFICATES
+            // Android 9 and 10 only collect an archive's certificates when GET_SIGNATURES is set.
+            PackageManager.GET_SIGNING_CERTIFICATES or PackageManager.GET_SIGNATURES
         } else {
             PackageManager.GET_SIGNATURES
         }
@@ -125,6 +126,16 @@ object SelfInstaller {
             digests(result.signerCertificates),
             digests(result.signingCertificateLineage?.certificatesInLineage.orEmpty()),
         )
+    }
+
+    @Suppress("DEPRECATION")
+    internal fun archiveSignerDigests(info: android.content.pm.PackageInfo): List<String> {
+        val certificates = (if (Build.VERSION.SDK_INT >= 28) info.signingInfo?.apkContentsSigners else null)
+            ?: info.signatures
+        return certificates.orEmpty().map { certificate ->
+            MessageDigest.getInstance("SHA-256").digest(certificate.toByteArray())
+                .joinToString("") { "%02x".format(it) }
+        }
     }
 
     fun install(context: Context, apk: File) {

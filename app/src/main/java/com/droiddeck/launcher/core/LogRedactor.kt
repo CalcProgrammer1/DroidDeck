@@ -82,6 +82,7 @@ object LogRedactor {
         "(?:android\\.(?:hardware|frameworks|hidl|system)|vendor\\.[A-Za-z0-9_]+\\.hardware)" +
             "(?:\\.[A-Za-z0-9_]+)+@[0-9]+\\.[0-9]+(?:-[A-Za-z0-9_]+)*\\.so"
     )
+
     private val JWT_LABELLED = Regex("(?i)(\\bJWT[\\s=:]+)(\\d{8,})")
     private val JWT_BASE64 = Regex("ey[A-Za-z0-9_\\-]{6,}\\.[A-Za-z0-9_\\-]{6,}\\.[A-Za-z0-9_\\-]{6,}")
     private val GUID = Regex("\\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\\b")
@@ -227,15 +228,20 @@ object LogRedactor {
         return out
     }
 
-    fun isText(file: java.io.File): Boolean = try {
-        file.isFile && file.inputStream().use { input ->
+    /** The at-rest rewrite reads a file into memory twice; larger logs are only scrubbed on the way out. */
+    const val IN_MEMORY_SCRUB_MAX = 64L * 1024 * 1024
+
+    fun isBinary(file: java.io.File): Boolean = try {
+        file.inputStream().use { input ->
             val buf = ByteArray(4096)
             val n = input.read(buf)
-            n <= 0 || (0 until n).none { buf[it].toInt() == 0 }
+            n > 0 && (0 until n).any { buf[it].toInt() == 0 }
         }
     } catch (e: Exception) {
-        false
+        true
     }
+
+    fun isText(file: java.io.File): Boolean = file.isFile && file.length() < IN_MEMORY_SCRUB_MAX && !isBinary(file)
 
     const val RULES_VERSION = 3
 
@@ -264,7 +270,63 @@ object LogRedactor {
         src: java.io.File,
         out: java.io.Writer,
         shouldStop: () -> Boolean = { false },
-    ): Boolean = scrubLines(src, out, ::redactForShare, shouldStop)
+    ): Boolean {
+        src.inputStream().buffered().use { input ->
+            input.mark(2)
+            val first = input.read()
+            val second = input.read()
+            input.reset()
+            if ((first == 0xff && second == 0xfe) || (first == 0xfe && second == 0xff)) {
+                out.write("<unsupported encoding; file withheld>\n")
+                return true
+            }
+            val decoder = Charsets.UTF_8.newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+            java.io.InputStreamReader(input, decoder).use { reader ->
+                val buffer = CharArray(8192)
+                val line = StringBuilder(4096)
+                var withheld = false
+                var afterCr = false
+                fun emit() {
+                    out.write(if (withheld) "<unsupported or oversized line withheld>" else redactForShare(line.toString()))
+                    out.write("\n")
+                    line.setLength(0)
+                    withheld = false
+                }
+                try {
+                    while (true) {
+                        if (shouldStop()) return false
+                        val size = reader.read(buffer)
+                        if (size < 0) break
+                        if (shouldStop()) return false
+                        for (i in 0 until size) {
+                            if (shouldStop()) return false
+                            val ch = buffer[i]
+                            if (afterCr) {
+                                afterCr = false
+                                if (ch == '\n') continue
+                            }
+                            if (ch == '\r' || ch == '\n') {
+                                emit()
+                                afterCr = ch == '\r'
+                            } else if (!withheld) {
+                                if (ch == '\u0000' || line.length == MAX_LINE_LENGTH) {
+                                    withheld = true
+                                    line.setLength(0)
+                                } else line.append(ch)
+                            }
+                        }
+                    }
+                    if (withheld || line.isNotEmpty()) emit()
+                } catch (_: java.nio.charset.CharacterCodingException) {
+                    out.write("<unsupported encoding; file withheld>\n")
+                }
+            }
+        }
+        return true
+    }
+
 
     private fun scrubLines(
         src: java.io.File,
@@ -380,6 +442,7 @@ object LogRedactor {
                     val quote = it.group(2).orEmpty()
                     "${it.group(1)}${quote}<redacted:token>${quote}"
                 })
+
             }
             if (out.has("guard", "factor", "2fa")) out.set(replaceMatches(out.text, GUARD_CODE) { "${it.group(1)}<redacted:code>" })
             if (out.hasRun(32, ::isHex)) out.set(replaceMatches(out.text, WEBAPI_KEY, "<redacted:key>"))
@@ -399,6 +462,7 @@ object LogRedactor {
             for (r in accounts) if (r.needs == null || out.has(r.needs)) out.set(replaceMatches(out.text, r.regex, "<redacted:account>"))
             if ('@' in out.text) out.set(replaceMatches(out.text, EMAIL) { m ->
                 m.group().takeIf { isHidlLoaderDiagnostic(out.text, m) } ?: "<redacted:email>"
+
             })
             if (out.has("jwt", "token", "ticket", "sessionid", "steamloginsecure", "machineauth")) {
                 out.set(replaceMatches(out.text, RESIDUAL) { "${it.group(1)}=<redacted:token>" })

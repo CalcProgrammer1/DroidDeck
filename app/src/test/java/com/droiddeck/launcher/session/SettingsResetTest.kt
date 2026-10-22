@@ -27,12 +27,19 @@ class SettingsResetTest {
 
     @Test fun settingsGoBackToTheirDefaults() {
         SessionPrefs.setTheme(app, "ocean")
+        SessionPrefs.setUnfoldedControlsWithController(app, true)
         SessionPrefs.setNoXalia(app, false)
         SessionPrefs.setFpsLimit(app, SessionService.MODE_STEAM, 30)
         SessionPrefs.setHdr(app, SessionService.MODE_DESKTOP, true)
         SessionPrefs.setResolutionChoice(app, SessionService.MODE_STEAM, "1280x800")
         SessionPrefs.setGuestHostname(app, "MyDeck")
         SessionPrefs.setGameDebugLogsEnabled(app, true)
+        SessionPrefs.setHudShowFps(app, false)
+        SessionPrefs.setHudShowBattery(app, false)
+        SessionPrefs.setHudShowGraph(app, false)
+        SessionPrefs.setHudColor(app, "amber")
+        SessionPrefs.setHudOpacity(app, 40)
+
         ControllerPrefs.setOpacity(app, 40)
         AppUiPrefs.setScale(app, 150)
         FrameGen.set(app, FrameGen.Mode(FrameGen.ENGINE_DDFG, 3))
@@ -41,6 +48,7 @@ class SettingsResetTest {
         assertTrue(SettingsReset.resetAll(app, gameProfiles = false))
 
         assertEquals("graphite", SessionPrefs.theme(app))
+        assertFalse(SessionPrefs.unfoldedControlsWithController(app))
         assertTrue(SessionPrefs.noXalia(app))
         assertEquals(0, SessionPrefs.fpsLimit(app, SessionService.MODE_STEAM))
         assertFalse(SessionPrefs.hdr(app, SessionService.MODE_DESKTOP))
@@ -50,6 +58,14 @@ class SettingsResetTest {
         val guest = java.io.File(com.droiddeck.launcher.runtime.LinuxRuntime.rootDir(app),
             "root/.config/droiddeck/game-environment.json")
         assertFalse(org.json.JSONObject(guest.readText()).getBoolean(GameEnvironmentStore.GAME_DEBUG_LOGS))
+        assertTrue(SessionPrefs.hudShowFps(app))
+        assertTrue(SessionPrefs.hudShowBattery(app))
+        assertTrue(SessionPrefs.hudShowGraph(app))
+        assertEquals(SessionPrefs.HUD_COLOR_MINT, SessionPrefs.hudColor(app))
+        assertEquals(SessionPrefs.HUD_OPACITY_DEFAULT, SessionPrefs.hudOpacity(app))
+        assertEquals("32.4°C", PerfHud.batteryCelsius(324))
+        assertNull(PerfHud.batteryCelsius(0))
+
         assertEquals(100, ControllerPrefs.read(app).opacity)
         assertEquals(AppUiPrefs.DEFAULT_SCALE, AppUiPrefs.scale(app))
         assertEquals(FrameGen.Mode.OFF.engine, FrameGen.engine(app))
