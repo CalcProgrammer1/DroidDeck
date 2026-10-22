@@ -761,7 +761,7 @@
       },
       "recipe_inputs": {
         "tools/dxvk/build_mali.sh": "1c1d06c51874039937efc1f68617ffb73beb7a57a76781954263204c9fdf46d2",
-        "tools/dxvk/mali-patches/0001-experimental-mali-capabilities-and-guards.patch": "61200ace1f66a150b0f8b299be57bb5d8eae95e0f52222f5924e69d9caf4ab0d",
+        "tools/dxvk/mali-patches/0001-experimental-mali-capabilities-and-guards.patch": "57b4ac3e13c3decc3d18b9b6514cb0f65215d446bfddcb1d1c1a440cf4d44d24",
         "tools/dxvk/mali-source.env": "51f7d7aeaa2395aeada1b3de37a34c96e8035fd3f7004c6be6aa6bf77f537d45",
         "tools/dxvk/patches/0001-check-direct3d-bc-formats.patch": "d38fc4d773b7974498dcb377dbaa883c9bba36aefa3235b39bca69d6dd220c77",
         "tools/dxvk/patches/0002-present-semaphore-per-swapchain-image.patch": "c802789a33099d3efc3413a297e2b752f8eb84c18cbfbdfc04e188f4090410d0",
