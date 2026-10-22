@@ -278,8 +278,10 @@ index 8e9a76e..7c3215e 100644
 +    // truncating the native 0xb8a20000 device ID to zero. Keep that path
 +    // restricted to the exact driver and device name measured here.
 +    bool matchesDevice = properties.deviceID == 0xb8a20000
++      || properties.deviceID == 0xa8620000
 +      || (properties.deviceID == 0
-+       && !std::strcmp(properties.deviceName, "Mali-G715"));
++       && (!std::strcmp(properties.deviceName, "Mali-G715")
++        || !std::strcmp(properties.deviceName, "Mali-G710")));
 +
 +    m_maliCompat = env::getEnvVar("DXVK_MALI_COMPAT") == "1"
 +      && properties.vendorID == 0x13b5
