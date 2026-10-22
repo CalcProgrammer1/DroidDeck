@@ -37,6 +37,11 @@ class ComponentsCatalogSourcesTest {
         File(context.filesDir, "components").deleteRecursively()
         File(context.filesDir, "repository-sources").deleteRecursively()
         File(context.cacheDir, "repository-metadata").deleteRecursively()
+        for (comp in ComponentsManager.COMPONENTS) {
+            ComponentsManager.saveSources(context, comp, ComponentsManager.sources(context, comp).map {
+                it.copy(hidden = it.repository == "droid-deck/droiddeck-components")
+            })
+        }
         ComponentsManager.catalogRefresher = productionRefresher
     }
 
@@ -107,7 +112,7 @@ class ComponentsCatalogSourcesTest {
                 it.copy(hidden = true)
             })
         }
-        val source = ComponentsManager.sources(context, comp).single()
+        val source = nightliesSource(comp)
         val sha = "a".repeat(64)
         val bodies = linkedMapOf(
             "unrelated" to JSONObject().put("schema", 1).put("component", "fex").toString(),
@@ -201,13 +206,16 @@ class ComponentsCatalogSourcesTest {
     }
 
     private fun bindBuiltIns(): Map<String, RepositorySources.Source> = ComponentsManager.COMPONENTS.associateWith { comp ->
-        val source = ComponentsManager.sources(context, comp).single()
+        val source = nightliesSource(comp)
         RepositorySources.bind(
             context, ComponentsManager.sourceScope(comp), ComponentsManager.sourceBuiltIns(comp), source,
             100L + ComponentsManager.COMPONENTS.indexOf(comp),
             RepositorySources.generation(context, ComponentsManager.sourceScope(comp), ComponentsManager.sourceBuiltIns(comp)),
         )
     }
+
+    private fun nightliesSource(comp: String) = ComponentsManager.sources(context, comp)
+        .single { it.repository == RepositorySources.canonicalRepository("The412Banner/Nightlies") }
 
     private fun item(comp: String, source: RepositorySources.Source, name: String): ComponentsManager.CatalogItem {
         val digest = (comp.first().code % 16).toString(16).repeat(64)
